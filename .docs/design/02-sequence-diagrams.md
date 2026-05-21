@@ -453,6 +453,7 @@ sequenceDiagram
             Facade->>+Service: deleteBrand(brand)
             Note over Service,DB: @Transactional
             Service->>DB: soft delete products WHERE brandId
+            Service->>DB: soft delete users WHERE brandId (BRAND_ADMIN)
             Service->>DB: soft delete brand
             deactivate Service
             Controller-->>Admin: 200
