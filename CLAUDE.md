@@ -7,8 +7,8 @@
 - 애플리케이션 서비스는 서로 다른 도메인을 조립해, 도메인 로직을 조정하여 기능을 제공해야 합니다.
 - 규칙이 여러 서비스에 나타나면 도메인 객체에 속할 가능성이 높습니다.
 - 각 기능에 대한 책임과 결합도에 대해 개발자의 의도를 확인하고 개발을 진행합니다.
-- Domain Service는 도메인 간 협력 로직을 담당하며, 상태 없이 도메인 객체의 협력 중심으로 설계합니다.
-- Application Layer는 경량(thin)으로 유지하며, 도메인 객체를 조합하는 orchestration 역할만 수행합니다.
+- Domain Service는 Repository 의존 없이 순수 도메인 로직만 담당합니다. 도메인 객체를 파라미터로 받아 비즈니스 규칙을 수행하고 도메인 객체를 반환합니다.
+- Application Layer(Facade)는 Repository 로드·저장과 도메인 간 조율을 담당합니다.
 
 ### 아키텍처, 패키지 구성 전략
 - 본 프로젝트는 4티어 레이어드 아키텍처를 따릅니다: `interfaces → application → domain ← infrastructure`
@@ -48,7 +48,8 @@ com.loopers/
 | 종류 | 위치 | 어노테이션 | 특징 |
 |------|------|-----------|------|
 | 단위 테스트 | `{domain}/domain/XxxModelTest` | 없음 (순수 Java) | Model 생성·유효성 검증 |
-| 통합 테스트 | `{domain}/domain/XxxServiceIntegrationTest` | `@SpringBootTest` | 실제 DB(Testcontainers), `DatabaseCleanUp`으로 격리 |
+| 단위 테스트 | `{domain}/domain/XxxServiceTest` | 없음 (순수 Java) | DomainService 비즈니스 로직 검증 (Repository 불필요) |
+| 통합 테스트 | `{domain}/application/XxxFacadeIntegrationTest` | `@SpringBootTest` | 실제 DB(Testcontainers), `DatabaseCleanUp`으로 격리 |
 | E2E 테스트 | `{domain}/interfaces/XxxApiE2ETest` | `@SpringBootTest(webEnvironment=RANDOM_PORT)` | `TestRestTemplate` 사용, 실제 HTTP 요청 |
 
 - 테스트 메서드 이름은 `동사_when조건` 패턴을 따른다 (예: `returnsExampleInfo_whenValidIdIsProvided`)
@@ -78,9 +79,13 @@ com.loopers/
 - [ ] 이름이 두 글자 이상이면 마지막 글자만 * 처리 → "홍길동" → "홍길*"
 - [ ] 이름이 한 글자이면 * 하나만 반환 → "*"
 
-[통합] UserService 내 정보 조회
-- [ ] 존재하는 loginId로 조회 → 회원 정보 반환
-- [ ] 존재하지 않는 loginId로 조회 → null 반환
+[단위] UserService 회원가입
+- [ ] 이미 존재하는 loginId → CONFLICT 예외
+- [ ] 존재하지 않는 loginId → 비밀번호 인코딩 후 UserModel 반환
+
+[통합] UserFacade 회원가입
+- [ ] 정상 요청 → DB에 저장되고 UserInfo 반환
+- [ ] 중복 loginId → CONFLICT 예외
 
 [E2E] GET /api/v1/users/me
 - [ ] 정상 조회 → 200, 유저 정보 반환
