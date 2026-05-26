@@ -1,12 +1,12 @@
 package com.loopers.interfaces.api;
 
+import com.loopers.domain.user.PasswordEncryptor;
 import com.loopers.domain.user.UserModel;
-import com.loopers.domain.user.UserService;
+import com.loopers.domain.user.UserRepository;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.MethodParameter;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.bind.support.WebDataBinderFactory;
 import org.springframework.web.context.request.NativeWebRequest;
@@ -20,8 +20,8 @@ public class LoginUserResolver implements HandlerMethodArgumentResolver {
     private static final String HEADER_LOGIN_ID = "X-Loopers-LoginId";
     private static final String HEADER_LOGIN_PW = "X-Loopers-LoginPw";
 
-    private final UserService userService;
-    private final PasswordEncoder passwordEncoder;
+    private final UserRepository userRepository;
+    private final PasswordEncryptor passwordEncryptor;
 
     // @CurrentUser LoginUser 조합인 파라미터에만 동작
     @Override
@@ -45,10 +45,10 @@ public class LoginUserResolver implements HandlerMethodArgumentResolver {
             throw new CoreException(ErrorType.BAD_REQUEST, HEADER_LOGIN_PW + " 헤더가 없습니다.");
         }
 
-        UserModel user = userService.findByLoginId(loginId)
+        UserModel user = userRepository.findByLoginId(loginId)
             .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "사용자를 찾을 수 없습니다."));
 
-        if (!passwordEncoder.matches(loginPw, user.getPassword())) {
+        if (!passwordEncryptor.matches(loginPw, user.getPassword())) {
             throw new CoreException(ErrorType.BAD_REQUEST, "비밀번호가 일치하지 않습니다.");
         }
 

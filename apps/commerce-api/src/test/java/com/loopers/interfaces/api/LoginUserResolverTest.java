@@ -1,8 +1,9 @@
 package com.loopers.interfaces.api;
 
 import com.loopers.domain.user.Gender;
+import com.loopers.domain.user.PasswordEncryptor;
 import com.loopers.domain.user.UserModel;
-import com.loopers.domain.user.UserService;
+import com.loopers.domain.user.UserRepository;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import org.junit.jupiter.api.DisplayName;
@@ -13,7 +14,6 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.MethodParameter;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.context.request.NativeWebRequest;
 
 import java.util.Optional;
@@ -26,8 +26,8 @@ import static org.mockito.BDDMockito.given;
 @ExtendWith(MockitoExtension.class)
 class LoginUserResolverTest {
 
-    @Mock private UserService userService;
-    @Mock private PasswordEncoder passwordEncoder;
+    @Mock private UserRepository userRepository;
+    @Mock private PasswordEncryptor passwordEncryptor;
     @Mock private NativeWebRequest webRequest;
     @Mock private MethodParameter methodParameter;
 
@@ -47,8 +47,8 @@ class LoginUserResolverTest {
 
             given(webRequest.getHeader("X-Loopers-LoginId")).willReturn(loginId);
             given(webRequest.getHeader("X-Loopers-LoginPw")).willReturn(loginPw);
-            given(userService.findByLoginId(loginId)).willReturn(Optional.of(user));
-            given(passwordEncoder.matches(loginPw, user.getPassword())).willReturn(true);
+            given(userRepository.findByLoginId(loginId)).willReturn(Optional.of(user));
+            given(passwordEncryptor.matches(loginPw, user.getPassword())).willReturn(true);
 
             // act
             LoginUser result = (LoginUser) resolver.resolveArgument(null, null, webRequest, null);
@@ -100,8 +100,8 @@ class LoginUserResolverTest {
 
             given(webRequest.getHeader("X-Loopers-LoginId")).willReturn(loginId);
             given(webRequest.getHeader("X-Loopers-LoginPw")).willReturn("WrongPw1!");
-            given(userService.findByLoginId(loginId)).willReturn(Optional.of(user));
-            given(passwordEncoder.matches("WrongPw1!", user.getPassword())).willReturn(false);
+            given(userRepository.findByLoginId(loginId)).willReturn(Optional.of(user));
+            given(passwordEncryptor.matches("WrongPw1!", user.getPassword())).willReturn(false);
 
             // act
             CoreException result = assertThrows(CoreException.class, () ->
