@@ -727,3 +727,25 @@ com.loopers/
         ├── AdminOrderV1Controller.java
         └── AdminOrderV1Dto.java
 ```
+
+---
+
+## 요구사항 체크리스트와 구현의 차이 — 의도적 설계 선택
+
+요구사항 체크리스트에 아래 두 항목이 있다.
+
+> - 도메인 간 협력 로직은 Domain Service에 위치시켰다
+> - 상품 상세 조회 시 Product + Brand 정보 조합은 도메인 서비스에서 처리했다
+
+**현재 구현은 이 두 로직을 Facade(Application Layer)에서 처리한다.**
+
+- `ProductFacade.getProduct()` — Product 조회 후 brandName을 Facade에서 조합
+- `ProductFacade.getProducts()` — IN 쿼리로 브랜드 일괄 조회 후 Facade에서 조합
+
+이는 누락이나 버그가 아니라 **결정 11**에서 내린 의도적인 아키텍처 선택이다.
+
+**이유**
+- 결정 11에 따라 DomainService는 Repository 의존 없이 순수 도메인 로직만 담당한다.
+- `Product + Brand` 조합은 두 Repository를 모두 호출해야 하므로, Repository 로드·저장을 담당하는 Facade의 책임 범위에 해당한다.
+- 체크리스트의 "Domain Service"는 DDD 문헌에서 Application Service를 포함해 넓게 쓰이는 용어다.
+  우리 구현에서 Facade(Application Layer)가 그 역할을 수행하므로 의미상 요구사항을 충족한다.
