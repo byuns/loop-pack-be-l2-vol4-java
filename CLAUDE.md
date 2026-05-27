@@ -7,8 +7,8 @@
 - 애플리케이션 서비스는 서로 다른 도메인을 조립해, 도메인 로직을 조정하여 기능을 제공해야 합니다.
 - 규칙이 여러 서비스에 나타나면 도메인 객체에 속할 가능성이 높습니다.
 - 각 기능에 대한 책임과 결합도에 대해 개발자의 의도를 확인하고 개발을 진행합니다.
-- Domain Service는 Repository 의존 없이 순수 도메인 로직만 담당합니다. 도메인 객체를 파라미터로 받아 비즈니스 규칙을 수행하고 도메인 객체를 반환합니다.
-- Application Layer(Facade)는 Repository 로드·저장과 도메인 간 조율을 담당합니다.
+- Domain Service는 Repository 의존 없이 순수 도메인 로직만 담당합니다. 도메인 객체를 파라미터로 받아 비즈니스 규칙을 수행하고 도메인 객체를 반환합니다. 크로스 도메인 협력 로직도 DomainService가 담당하며, 이때 Facade가 로드한 타 도메인 객체를 파라미터로 받아 처리합니다.
+- Application Layer(Facade)는 Repository 로드·저장과 DomainService 호출 순서 조율을 담당합니다. 크로스 도메인 비즈니스 로직을 Facade에 인라인으로 직접 작성하지 않습니다.
 
 ### 아키텍처, 패키지 구성 전략
 - 본 프로젝트는 4티어 레이어드 아키텍처를 따릅니다: `interfaces → application → domain ← infrastructure`

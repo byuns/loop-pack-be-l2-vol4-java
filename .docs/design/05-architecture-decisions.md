@@ -33,7 +33,8 @@ interfaces → application → domain ← infrastructure
 - 본 프로젝트에서 인프라(DB, 외부 API)를 교체할 가능성이 낮고, 규모가 크지 않다.
 - DIP는 실제 교체 가능성이 있는 `Repository`, `PasswordEncryptor`에만 적용해 복잡도를 낮춘다. (→ 결정 3 참고)
 - 레이어 간 의존 방향을 단방향으로 강제해 변경 영향 범위를 제한하는 것만으로 충분하다고 판단했다.
-- Application Layer(Facade)는 Repository 로드·저장과 도메인 간 조율을 담당한다.
+- Application Layer(Facade)는 Repository 로드·저장을 담당한다.
+- 도메인 간 협력 비즈니스 로직은 Domain Layer(DomainService)에서 처리한다.
 - 핵심 비즈니스 로직은 Domain Layer(Model, Service)에 위치한다.
 
 ---
@@ -109,28 +110,48 @@ com.loopers/
 ## 결정 4. 크로스 도메인 로직 위치
 
 **결정**
-- 여러 도메인에 걸친 협력 로직은 Application Layer(Facade)에서 처리한다.
-- 각 도메인 서비스는 자신의 도메인만 담당하고, Facade가 순서를 조율한다.
+- 여러 도메인에 걸친 협력 비즈니스 로직은 Domain Layer(DomainService)에서 처리한다.
+- DomainService는 Facade가 로드한 여러 도메인의 객체를 파라미터로 받아 비즈니스 규칙을 수행한다.
+  (Repository를 직접 주입받지 않는 원칙은 유지된다 — 결정 11 참고)
+- Facade는 Repository 로드·저장과 DomainService 호출 순서 조율만 담당한다.
+
+**흐름**
+```
+Facade: 여러 Repository에서 도메인 객체 로드
+  → DomainService: 도메인 객체를 파라미터로 받아 크로스 도메인 비즈니스 로직 수행
+  → Facade: 변경된 도메인 객체를 Repository에 저장
+```
 
 **이유**
-- Domain 레이어가 다른 도메인의 Service/Repository를 직접 참조하면 의존이 뒤얽힌다.
-- Facade에서 조율하면 각 도메인 서비스는 단순하게 유지되고, 흐름은 한 곳에서 읽을 수 있다.
+- "재고 차감을 어떻게 하는가", "삭제 연쇄를 어떻게 처리하는가"는 비즈니스 규칙이다.
+  비즈니스 규칙은 Application Layer가 아닌 Domain Layer에 위치해야 한다.
+- Facade가 크로스 도메인 로직을 인라인으로 처리하면, 동일 규칙이 여러 Facade에 분산될 위험이 있다.
+- DomainService에 위치하면 Repository 없이 순수 Java 단위 테스트로 검증 가능하다.
+
+**트레이드오프**
+- DomainService가 타 도메인의 Model을 파라미터로 받으므로 Domain 레이어에 cross-domain import가 생긴다.
+  이는 결정 9에서 금지한 Service/Repository 직접 참조와 다른, **파라미터 수준의 약한 결합**으로 허용한다.
+- 유스케이스 전체 흐름을 파악하려면 Facade와 DomainService 두 파일을 오가야 한다.
 
 **예시 — 브랜드 삭제 연쇄 처리**
 
 ```java
-// brand/application/BrandFacade.java
+// brand/domain/BrandService.java — Repository 없음, 크로스 도메인 비즈니스 로직 담당
+public void deleteCascade(BrandModel brand, List<ProductModel> products, List<UserModel> admins) {
+    products.forEach(ProductModel::softDelete);    // 상품 소프트 딜리트
+    admins.forEach(UserModel::softDelete);         // BRAND_ADMIN 소프트 딜리트
+    brand.softDelete();                            // 브랜드 소프트 딜리트
+}
+
+// brand/application/BrandFacade.java — 로드·저장 및 호출 순서 조율만 담당
 @Transactional
 public void deleteBrand(Long brandId) {
-    // Facade가 Repository를 직접 호출해 로드
     BrandModel brand = brandService.getOrThrow(brandRepository.findById(brandId));
     List<ProductModel> products = productRepository.findAllByBrandId(brandId);
-    List<UserModel> brandAdmins = userRepository.findAllByBrandId(brandId);
+    List<UserModel> admins = userRepository.findAllByBrandId(brandId);
 
-    // 각 DomainService에 도메인 로직 위임
-    products.forEach(productService::softDelete);       // 상품 소프트 딜리트
-    brandAdmins.forEach(userService::softDelete);       // BRAND_ADMIN 소프트 딜리트
-    brandService.softDelete(brand);                     // 브랜드 소프트 딜리트
+    brandService.deleteCascade(brand, products, admins); // 비즈니스 로직은 DomainService에 위임
+    // 변경된 객체들은 JPA dirty checking으로 자동 반영
 }
 ```
 
@@ -302,22 +323,26 @@ Map<Long, BrandModel> brandMap = brandRepository.findAllByIds(brandIds)
 ```
 
 **확정된 원칙**
-- Domain 레이어: 자기 도메인 로직만 담당. 다른 도메인의 Service/Repository 직접 참조 금지.
-- Application 레이어: 도메인 간 협력이 일어나는 유일한 곳. 브랜드·상품 정보 조합도 Facade에서 처리.
+- Domain 레이어: 다른 도메인의 Service/Repository 직접 참조 금지.
+  단, Facade가 로드해 파라미터로 건넨 타 도메인 Model은 받을 수 있다 (파라미터 수준의 약한 결합).
+- Application 레이어: Repository 로드·저장과 DomainService 호출 순서 조율만 담당.
+  크로스 도메인 비즈니스 로직을 인라인으로 직접 처리하지 않는다.
 - `Application → Domain ← Infrastructure` 레이어 원칙 준수.
 
 **전체 의존 방향 지도**
 
 ```
-[Domain 레이어 — 수평 의존 없음]
+[Domain 레이어 — Service/Repository 수평 의존 없음, 파라미터로 타 도메인 Model 수신 가능]
 product/domain  (brand/domain을 import하지 않음)
+order/domain    ← (파라미터로) ProductModel 수신
+brand/domain    ← (파라미터로) ProductModel, UserModel 수신
 
-[Application 레이어 — 도메인 간 조합]
-product/application ──► brand/domain  (상품 조회 시 브랜드 정보 조합)
-like/application    ──► product/domain  (likeCount 업데이트, 좋아요 목록 상품 조회)
-order/application   ──► product/domain  (재고 차감, 스냅샷)
-brand/application   ──► product/domain  (브랜드 삭제 연쇄)
-brand/application   ──► user/domain     (브랜드 삭제 연쇄)
+[Application 레이어 — 로드·저장·순서 조율만]
+product/application ──► brand/domain    (브랜드 정보 로드 후 ProductService에 위임)
+like/application    ──► product/domain  (상품 로드 후 LikeService에 위임)
+order/application   ──► product/domain  (상품 로드 후 OrderService에 위임)
+brand/application   ──► product/domain  (상품 로드 후 BrandService에 위임)
+brand/application   ──► user/domain     (유저 로드 후 BrandService에 위임)
 ```
 
 **유사 관계 검토 — User(BRAND_ADMIN) → Brand**
@@ -437,34 +462,35 @@ public UserInfo signUp(...) {
 
 | 레이어 | 책임 |
 |--------|------|
-| DomainService | 순수 비즈니스 규칙 — 엔티티를 받아 검증·변환·조립 |
-| Facade | Repository 로드·저장 + 크로스 도메인 조율 |
+| DomainService | 순수 비즈니스 규칙 + 크로스 도메인 협력 로직 — 엔티티를 파라미터로 받아 검증·변환·조립·상태 변경 |
+| Facade | Repository 로드·저장 + DomainService 호출 순서 조율 |
 
 **예시**
 
 ```java
-// order/domain/OrderService.java — Repository 없음, 순수 도메인 로직만
-// 존재 검증처럼 도메인 규칙만 담당. 생성 로직은 OrderModel 생성자 또는 Facade가 직접 처리.
-public OrderModel getOrThrow(Optional<OrderModel> order) {
-    return order.orElseThrow(() -> new CoreException(NOT_FOUND, "주문이 존재하지 않습니다."));
+// order/domain/OrderService.java — Repository 없음, 크로스 도메인 비즈니스 로직 담당
+public OrderModel createOrder(Long userId, List<ProductModel> products, Map<Long, Integer> quantities) {
+    // 재고 차감 (Order → Product 크로스 도메인 규칙)
+    products.forEach(p -> p.decreaseStock(quantities.getOrDefault(p.getId(), 0)));
+    // 스냅샷 생성
+    List<OrderItemModel> items = products.stream()
+        .map(p -> new OrderItemModel(p.getId(), p.getName(), p.getPrice(), quantities.get(p.getId())))
+        .toList();
+    return new OrderModel(userId, items);
 }
 
-// order/application/OrderFacade.java — 로드·저장·크로스 도메인 조율
+// order/application/OrderFacade.java — 로드·저장만 담당
 @Transactional
 public OrderInfo createOrder(Long userId, List<OrderItemRequest> requests) {
-    List<ProductModel> products = productRepository.findAllByIds(...); // Facade가 로드
-    products.forEach(p -> p.decreaseStock(qty));                       // 크로스 도메인 로직 (재고 차감)
-    List<OrderItemModel> items = products.stream()
-        .map(p -> new OrderItemModel(p.getId(), p.getName(), p.getPrice(), qty))
-        .toList();
-    OrderModel order = new OrderModel(userId, items);                  // Facade가 직접 생성
-    return OrderInfo.from(orderRepository.save(order));                // Facade가 저장
+    Map<Long, Integer> quantities = ...;
+    List<ProductModel> products = productRepository.findAllByIds(quantities.keySet()); // Facade가 로드
+
+    OrderModel order = orderService.createOrder(userId, products, quantities); // 크로스 도메인 로직은 DomainService에 위임
+
+    productRepository.saveAll(products); // 재고 변경 저장
+    return OrderInfo.from(orderRepository.save(order));
 }
 ```
-
-> ℹ️ `OrderService`는 현재 `getOrThrow()` 하나만 갖는다.
-> 주문 생성에서 '어떤 아이템으로 주문을 구성하는가'는 `OrderModel` 생성자에 캡슐화되고,
-> Facade가 로드·저장·크로스 도메인 조율을 모두 담당한다.
 
 **단순 조회의 경우 — finder 역할도 DomainService가 담당**
 
@@ -728,24 +754,3 @@ com.loopers/
         └── AdminOrderV1Dto.java
 ```
 
----
-
-## 요구사항 체크리스트와 구현의 차이 — 의도적 설계 선택
-
-요구사항 체크리스트에 아래 두 항목이 있다.
-
-> - 도메인 간 협력 로직은 Domain Service에 위치시켰다
-> - 상품 상세 조회 시 Product + Brand 정보 조합은 도메인 서비스에서 처리했다
-
-**현재 구현은 이 두 로직을 Facade(Application Layer)에서 처리한다.**
-
-- `ProductFacade.getProduct()` — Product 조회 후 brandName을 Facade에서 조합
-- `ProductFacade.getProducts()` — IN 쿼리로 브랜드 일괄 조회 후 Facade에서 조합
-
-이는 누락이나 버그가 아니라 **결정 11**에서 내린 의도적인 아키텍처 선택이다.
-
-**이유**
-- 결정 11에 따라 DomainService는 Repository 의존 없이 순수 도메인 로직만 담당한다.
-- `Product + Brand` 조합은 두 Repository를 모두 호출해야 하므로, Repository 로드·저장을 담당하는 Facade의 책임 범위에 해당한다.
-- 체크리스트의 "Domain Service"는 DDD 문헌에서 Application Service를 포함해 넓게 쓰이는 용어다.
-  우리 구현에서 Facade(Application Layer)가 그 역할을 수행하므로 의미상 요구사항을 충족한다.

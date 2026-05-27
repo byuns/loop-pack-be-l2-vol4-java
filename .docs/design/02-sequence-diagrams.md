@@ -120,9 +120,10 @@ sequenceDiagram
             Controller-->>Client: 409
         else 좋아요 없음
             Facade->>+Service: createLike(userId, productId)
-            Service->>DB: INSERT like
-            Service->>DB: UPDATE products SET like_count = like_count + 1
-            deactivate Service
+            Note right of Service: LikeModel 생성 (순수 도메인 로직)
+            Service-->>-Facade: LikeModel
+            Facade->>DB: INSERT like
+            Facade->>DB: UPDATE products SET like_count = like_count + 1
             Controller-->>Client: 200
         end
     end
@@ -152,10 +153,8 @@ sequenceDiagram
         Facade-->>Controller: CoreException(NOT_FOUND)
         Controller-->>Client: 404
     else 좋아요 존재
-        Facade->>+Service: deleteLike(like)
-        Service->>DB: DELETE like
-        Service->>DB: UPDATE products SET like_count = like_count - 1
-        deactivate Service
+        Facade->>DB: DELETE like
+        Facade->>DB: UPDATE products SET like_count = like_count - 1
         Controller-->>Client: 200
     end
     deactivate Facade
@@ -186,7 +185,7 @@ sequenceDiagram
 
 ## 시나리오 5. 주문 요청
 
-상품 존재 확인과 재고 확인·차감을 두 루프로 분리한다. 먼저 전체 항목의 존재 여부를 검증한 뒤, 비관적 락을 획득하고 재고를 차감한다. 한 루프에서 처리하면 일부 항목만 차감된 채로 실패할 수 있어 전체 검증 후 일괄 차감하는 방식을 택한다.
+상품 존재 확인과 재고 차감을 두 단계로 분리한다. 먼저 전체 항목의 존재 여부를 검증한 뒤, 비관적 락으로 상품을 일괄 조회해 OrderService에 위임한다. OrderService는 재고 차감과 스냅샷 생성을 순수 도메인 로직으로 처리하고, Facade가 변경 사항을 저장한다.
 
 ```mermaid
 sequenceDiagram
@@ -214,25 +213,22 @@ sequenceDiagram
             deactivate Service
         end
 
-        Note over Service,DB: 비관적 락 (PESSIMISTIC_WRITE)
-        loop 각 주문 항목
-            Facade->>+Service: decrementStock(productId, quantity)
-            Service->>+DB: SELECT product FOR UPDATE
-            DB-->>-Service: product (locked)
-            alt 재고 부족
-                Facade-->>Controller: CoreException(BAD_REQUEST)
-                Controller-->>Client: 400
-            else 재고 충분
-                Service->>DB: UPDATE stock -= quantity
-            end
-            deactivate Service
-        end
+        Note over Facade,DB: 비관적 락 (PESSIMISTIC_WRITE)
+        Facade->>DB: SELECT products FOR UPDATE (일괄 조회)
+        DB-->>Facade: products (locked)
 
-        Facade->>+Service: createOrder(userId, snapshots)
-        Note right of Service: 상품명·가격 스냅샷 저장
-        Service->>DB: INSERT order + orderItems
-        deactivate Service
-        Controller-->>Client: 201
+        Facade->>+Service: createOrder(userId, products, quantities)
+        Note right of Service: 재고 차감 + 스냅샷 생성 (순수 도메인 로직)
+        alt 재고 부족
+            Service-->>Facade: CoreException(BAD_REQUEST)
+            Facade-->>Controller: CoreException(BAD_REQUEST)
+            Controller-->>Client: 400
+        else 재고 충분
+            Service-->>-Facade: OrderModel
+            Facade->>DB: UPDATE products (stock 차감)
+            Facade->>DB: INSERT order + orderItems
+            Controller-->>Client: 201
+        end
     end
     deactivate Facade
     deactivate Controller
@@ -450,12 +446,14 @@ sequenceDiagram
             Facade-->>Controller: CoreException(NOT_FOUND)
             Controller-->>Admin: 404
         else 브랜드 존재
-            Facade->>+Service: deleteBrand(brand)
-            Note over Service,DB: @Transactional
-            Service->>DB: soft delete products WHERE brandId
-            Service->>DB: soft delete users WHERE brandId (BRAND_ADMIN)
-            Service->>DB: soft delete brand
+            Facade->>DB: SELECT products WHERE brandId
+            DB-->>Facade: products
+            Facade->>DB: SELECT users WHERE brandId (BRAND_ADMIN)
+            DB-->>Facade: admins
+            Facade->>+Service: deleteCascade(brand, products, admins)
+            Note right of Service: 소프트 딜리트 적용 (순수 도메인 로직)
             deactivate Service
+            Note over Facade,DB: JPA dirty checking — products / users / brand UPDATE 자동 반영
             Controller-->>Admin: 200
         end
         deactivate Facade
