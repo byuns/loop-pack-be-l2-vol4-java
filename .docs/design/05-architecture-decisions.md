@@ -421,6 +421,45 @@ brand/application   ──► product/domain  (상품 로드 후 BrandService에
 
 ---
 
+## 결정 13. Stock — 독립 도메인 분리
+
+**결정**
+- `stock/`을 `product/`와 독립된 별도 도메인으로 분리한다.
+- `ProductModel`에서 `stock` 필드를 제거하고, `StockModel`이 재고를 단독으로 관리한다.
+- `stocks` 테이블은 `product_id`(FK), `total_stock`, `reserved_stock`을 갖는다.
+
+**배경**
+- 결제 플로우 도입(주문 생성 → 결제 창 선점 → 결제 완료 확정)으로 재고가 `선점(reserved)` / `확정(confirmed)` / `해제(released)` 상태를 갖게 됨
+- 재고 변경과 상품 정보 변경의 이유가 다름: 상품명·가격 수정과 재고 수량 조정은 서로 다른 유스케이스에서 발생
+- 향후 재고 이력 추적(`stock_histories`) 추가 시 `product/`를 건드리지 않아도 됨
+
+**트레이드오프**
+
+| 항목 | 이점 | 비용 |
+|------|------|------|
+| 변경 이유 분리 | 상품 정보와 재고가 각자 이유로 변경 가능 | 상품 조회 시 재고를 함께 보여주려면 join 또는 별도 조회 필요 |
+| 선점 플로우 표현 | `reserved_stock` 상태를 Stock 자체가 관리 | `StockFacade` 추가, `OrderFacade`에서 cross-domain 호출 증가 |
+| 도메인 경계 명확 | Stock이 자체 Repository·Service를 가짐 | 전체 패키지 구조 변경, `ProductModel.decreaseStock()` 제거 |
+| 동시성 처리 집중 | 낙관적/비관적 잠금을 Stock 도메인 한 곳에서 처리 | 선점 만료 처리를 위한 스케줄러 별도 구현 필요 |
+
+**결제 플로우와의 연결**
+
+```
+POST /orders                     → OrderStatus: PENDING_PAYMENT  (재고 변동 없음)
+POST /orders/{id}/pay/start      → StockModel.reserve(quantity)  (reserved_stock += quantity)
+POST /orders/{id}/pay/confirm    → StockModel.confirm(quantity)  (total_stock -= quantity, reserved_stock -= quantity)
+                                 → OrderStatus: CONFIRMED
+[스케줄러] TTL 초과 시           → StockModel.release(quantity)  (reserved_stock -= quantity)
+                                 → OrderStatus: EXPIRED
+```
+
+**도메인 간 의존 방향**
+- `order/application` → `stock/domain` (StockRepository 로드·저장)
+- `stock/domain`은 `order/domain`을 알지 못함
+- 가용 재고 계산: `availableStock = total_stock - reserved_stock` (StockModel 내부 메서드)
+
+---
+
 ## 전체 패키지 스케치
 
 ```
@@ -466,11 +505,19 @@ com.loopers/
 │   │   ├── ProductService.java
 │   │   ├── SortCondition.java
 │   │   ├── Price.java                          ← VO
-│   │   ├── Stock.java                          ← VO
 │   │   └── ProductExistsSpecification.java     ← Specification
 │   ├── application/  (ProductFacade, ProductInfo)
 │   ├── infrastructure/  (ProductRepositoryImpl, ProductJpaRepository)
 │   └── interfaces/  (ProductV1Controller, AdminProductV1Controller, ...)
+│
+├── stock/                                      ← 결정 13: 독립 도메인
+│   ├── domain/
+│   │   ├── StockModel.java                     (productId, totalStock, reservedStock)
+│   │   ├── StockRepository.java
+│   │   └── StockService.java                   (reserve / confirm / release 로직)
+│   ├── application/  (StockFacade, StockInfo)
+│   ├── infrastructure/  (StockRepositoryImpl, StockJpaRepository)
+│   └── interfaces/  (AdminStockV1Controller, ...)
 │
 ├── like/
 │   ├── domain/
