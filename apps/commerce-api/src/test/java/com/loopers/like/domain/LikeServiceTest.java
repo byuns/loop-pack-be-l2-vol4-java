@@ -22,36 +22,6 @@ class LikeServiceTest {
         likeService = new LikeService();
     }
 
-    @DisplayName("getOrThrow를 호출할 때,")
-    @Nested
-    class GetOrThrow {
-
-        @DisplayName("like가 존재하면, 해당 like를 반환한다.")
-        @Test
-        void returnsLike_whenLikeExists() {
-            // arrange
-            LikeModel like = new LikeModel(1L, 2L);
-
-            // act
-            LikeModel result = likeService.getOrThrow(Optional.of(like));
-
-            // assert
-            assertThat(result).isEqualTo(like);
-        }
-
-        @DisplayName("like가 존재하지 않으면, NOT_FOUND 예외가 발생한다.")
-        @Test
-        void throwsNotFound_whenLikeNotExists() {
-            // act
-            CoreException exception = assertThrows(CoreException.class, () ->
-                likeService.getOrThrow(Optional.empty())
-            );
-
-            // assert
-            assertThat(exception.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
-        }
-    }
-
     @DisplayName("cancelLike를 호출할 때,")
     @Nested
     class CancelLike {
@@ -86,26 +56,12 @@ class LikeServiceTest {
     @Nested
     class CreateLike {
 
-        @DisplayName("이미 좋아요한 경우, CONFLICT 예외가 발생한다.")
+        // 중복 검증은 LikeRegistrationPolicy 책임 → LikeRegistrationPolicyTest에서 검증
+        @DisplayName("userId, productId가 주어지면, LikeModel을 반환한다.")
         @Test
-        void throwsConflict_whenAlreadyLiked() {
-            // arrange
-            LikeModel existing = new LikeModel(1L, 2L);
-
+        void returnsLikeModel_whenCalled() {
             // act
-            CoreException exception = assertThrows(CoreException.class, () ->
-                likeService.createLike(Optional.of(existing), 1L, 2L)
-            );
-
-            // assert
-            assertThat(exception.getErrorType()).isEqualTo(ErrorType.CONFLICT);
-        }
-
-        @DisplayName("아직 좋아요하지 않은 경우, LikeModel을 반환한다.")
-        @Test
-        void returnsLikeModel_whenNotYetLiked() {
-            // act
-            LikeModel result = likeService.createLike(Optional.empty(), 1L, 2L);
+            LikeModel result = likeService.createLike(1L, 2L);
 
             // assert
             assertAll(

@@ -57,6 +57,38 @@ class OrderServiceTest {
         }
     }
 
+    @DisplayName("checkOwnership을 호출할 때,")
+    @Nested
+    class CheckOwnership {
+
+        @DisplayName("주문 소유자가 맞으면, 예외 없이 통과한다.")
+        @Test
+        void doesNotThrow_whenUserIsOwner() {
+            // arrange
+            OrderModel order = new OrderModel(1L, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)));
+
+            // act & assert
+            org.junit.jupiter.api.Assertions.assertDoesNotThrow(() ->
+                orderService.checkOwnership(order, 1L)
+            );
+        }
+
+        @DisplayName("주문 소유자가 아니면, FORBIDDEN 예외가 발생한다.")
+        @Test
+        void throwsForbidden_whenUserIsNotOwner() {
+            // arrange
+            OrderModel order = new OrderModel(1L, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)));
+
+            // act
+            CoreException exception = assertThrows(CoreException.class, () ->
+                orderService.checkOwnership(order, 999L)
+            );
+
+            // assert
+            assertThat(exception.getErrorType()).isEqualTo(ErrorType.FORBIDDEN);
+        }
+    }
+
     @DisplayName("createOrder를 호출할 때,")
     @Nested
     class CreateOrder {

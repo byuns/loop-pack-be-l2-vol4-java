@@ -1,11 +1,11 @@
 package com.loopers.like.application;
 
 import com.loopers.like.domain.LikeModel;
+import com.loopers.like.domain.LikeRegistrationPolicy;
 import com.loopers.like.domain.LikeRepository;
 import com.loopers.like.domain.LikeService;
 import com.loopers.product.application.ProductInfo;
 import com.loopers.product.domain.ProductRepository;
-import com.loopers.product.domain.ProductService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,15 +19,15 @@ public class LikeFacade {
 
     private final LikeService likeService;
     private final LikeRepository likeRepository;
-    private final ProductService productService;
     private final ProductRepository productRepository;
+    private final LikeRegistrationPolicy likeRegistrationPolicy;
 
     @Transactional
     public LikeInfo addLike(Long userId, Long productId) {
-        productService.getOrThrow(productRepository.find(productId));
-
         Optional<LikeModel> existing = likeRepository.findByUserIdAndProductId(userId, productId);
-        LikeModel like = likeService.createLike(existing, userId, productId);
+        likeRegistrationPolicy.check(productRepository.find(productId), existing);
+
+        LikeModel like = likeService.createLike(userId, productId);
         LikeInfo saved = LikeInfo.from(likeRepository.save(like));
         productRepository.incrementLikeCount(productId);
         return saved;
