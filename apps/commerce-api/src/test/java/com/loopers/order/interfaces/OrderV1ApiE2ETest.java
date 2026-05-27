@@ -21,6 +21,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
+import java.time.LocalDate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -145,6 +146,73 @@ class OrderV1ApiE2ETest {
             ParameterizedTypeReference<ApiResponse<OrderV1Dto.OrderResponse>> responseType = new ParameterizedTypeReference<>() {};
             ResponseEntity<ApiResponse<OrderV1Dto.OrderResponse>> response =
                 testRestTemplate.exchange(ENDPOINT, HttpMethod.POST, new HttpEntity<>(request), responseType);
+
+            // assert
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+    }
+
+    @DisplayName("GET /api/v1/orders?startAt=...&endAt=...")
+    @Nested
+    class GetOrders {
+
+        @DisplayName("날짜 범위 내에 주문이 있으면, 200 OK와 주문 목록을 반환한다.")
+        @Test
+        void returnsOrderList_whenOrdersExistInRange() {
+            // arrange
+            ProductModel product = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, 100, null));
+            OrderV1Dto.CreateRequest createRequest = new OrderV1Dto.CreateRequest(
+                List.of(new OrderV1Dto.OrderItemRequest(product.getId(), 1))
+            );
+            testRestTemplate.exchange(ENDPOINT, HttpMethod.POST, new HttpEntity<>(createRequest, authHeaders()),
+                new ParameterizedTypeReference<ApiResponse<OrderV1Dto.OrderResponse>>() {});
+
+            LocalDate today = LocalDate.now();
+            String url = ENDPOINT + "?startAt=" + today + "&endAt=" + today;
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<OrderV1Dto.OrderResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<OrderV1Dto.OrderResponse>>> response =
+                testRestTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeaders()), responseType);
+
+            // assert
+            assertAll(
+                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getBody().data()).hasSize(1),
+                () -> assertThat(response.getBody().data().get(0).items()).hasSize(1)
+            );
+        }
+
+        @DisplayName("날짜 범위 내에 주문이 없으면, 200 OK와 빈 목록을 반환한다.")
+        @Test
+        void returnsEmptyList_whenNoOrdersInRange() {
+            // arrange
+            LocalDate past = LocalDate.of(2000, 1, 1);
+            String url = ENDPOINT + "?startAt=" + past + "&endAt=" + past;
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<OrderV1Dto.OrderResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<OrderV1Dto.OrderResponse>>> response =
+                testRestTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(authHeaders()), responseType);
+
+            // assert
+            assertAll(
+                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getBody().data()).isEmpty()
+            );
+        }
+
+        @DisplayName("인증 헤더가 없으면, 400 Bad Request를 반환한다.")
+        @Test
+        void returnsBadRequest_whenAuthHeaderIsMissing() {
+            // arrange
+            LocalDate today = LocalDate.now();
+            String url = ENDPOINT + "?startAt=" + today + "&endAt=" + today;
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<OrderV1Dto.OrderResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<OrderV1Dto.OrderResponse>>> response =
+                testRestTemplate.exchange(url, HttpMethod.GET, new HttpEntity<>(null), responseType);
 
             // assert
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);

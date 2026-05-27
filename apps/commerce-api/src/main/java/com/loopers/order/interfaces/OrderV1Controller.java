@@ -7,13 +7,16 @@ import com.loopers.support.auth.CurrentUser;
 import com.loopers.support.auth.LoginUser;
 import com.loopers.support.response.ApiResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.LocalDate;
 import java.util.List;
 
 @RequiredArgsConstructor
@@ -33,6 +36,19 @@ public class OrderV1Controller {
             .toList();
         OrderInfo info = orderFacade.createOrder(loginUser.id(), commands);
         return ApiResponse.success(OrderV1Dto.OrderResponse.from(info));
+    }
+
+    @GetMapping
+    public ApiResponse<List<OrderV1Dto.OrderResponse>> getOrders(
+        @CurrentUser LoginUser loginUser,
+        @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startAt,
+        @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endAt
+    ) {
+        List<OrderInfo> infos = orderFacade.getOrders(loginUser.id(), startAt, endAt);
+        List<OrderV1Dto.OrderResponse> responses = infos.stream()
+            .map(OrderV1Dto.OrderResponse::from)
+            .toList();
+        return ApiResponse.success(responses);
     }
 
     @GetMapping("/{orderId}")

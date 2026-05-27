@@ -11,6 +11,9 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -25,6 +28,9 @@ public class OrderFacade {
 
     @Transactional
     public OrderInfo createOrder(Long userId, List<OrderItemCommand> commands) {
+        if (commands == null || commands.isEmpty()) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "주문 항목은 비어있을 수 없습니다.");
+        }
         List<Long> productIds = commands.stream()
             .map(OrderItemCommand::productId)
             .toList();
@@ -42,6 +48,15 @@ public class OrderFacade {
 
         products.forEach(productRepository::save);
         return OrderInfo.from(orderRepository.save(order));
+    }
+
+    @Transactional(readOnly = true)
+    public List<OrderInfo> getOrders(Long userId, LocalDate startAt, LocalDate endAt) {
+        ZonedDateTime start = startAt.atStartOfDay(ZoneId.systemDefault());
+        ZonedDateTime end = endAt.plusDays(1).atStartOfDay(ZoneId.systemDefault());
+        return orderRepository.findAllByUserId(userId, start, end).stream()
+            .map(OrderInfo::from)
+            .toList();
     }
 
     @Transactional(readOnly = true)
