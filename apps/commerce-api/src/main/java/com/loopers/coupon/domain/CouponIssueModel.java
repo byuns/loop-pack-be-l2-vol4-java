@@ -1,0 +1,49 @@
+package com.loopers.coupon.domain;
+
+import com.loopers.domain.BaseEntity;
+import com.loopers.support.error.CoreException;
+import com.loopers.support.error.ErrorType;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
+import lombok.Getter;
+
+@Getter
+@Entity
+@Table(name = "coupon_issues",
+    uniqueConstraints = @UniqueConstraint(columnNames = {"coupon_id", "user_id"}))
+public class CouponIssueModel extends BaseEntity {
+
+    @Column(name = "coupon_id")
+    private Long couponId;
+
+    @Column(name = "user_id")
+    private Long userId;
+
+    @Enumerated(EnumType.STRING)
+    private CouponStatus status;
+
+    protected CouponIssueModel() {}
+
+    public CouponIssueModel(Long couponId, Long userId) {
+        if (couponId == null) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "쿠폰 ID는 비어있을 수 없습니다.");
+        }
+        if (userId == null) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "사용자 ID는 비어있을 수 없습니다.");
+        }
+        this.couponId = couponId;
+        this.userId = userId;
+        this.status = CouponStatus.AVAILABLE;
+    }
+
+    public void use() {
+        if (this.status == CouponStatus.USED) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "이미 사용된 쿠폰입니다.");
+        }
+        this.status = CouponStatus.USED;
+    }
+}
