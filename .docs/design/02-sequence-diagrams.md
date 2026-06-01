@@ -173,7 +173,7 @@ sequenceDiagram
 
 ### 5-1. 주문 생성
 
-상품 존재 여부를 검증하고 PENDING_PAYMENT 상태의 주문을 생성한다. 재고는 이 단계에서 변경하지 않는다.
+상품·쿠폰 유효성을 검증한 뒤 PENDING_PAYMENT 상태의 주문을 생성한다. 재고는 이 단계에서 변경하지 않는다.
 
 ```mermaid
 sequenceDiagram
@@ -183,21 +183,39 @@ sequenceDiagram
     participant DB
 
     Client->>+Controller: POST /api/v1/orders
-    Controller->>+Facade: createOrder(userId, orderItems)
+    Controller->>+Facade: createOrder(userId, orderItems, couponId?)
 
     alt 주문 항목 없음
         Facade-->>Controller: CoreException(BAD_REQUEST)
         Controller-->>Client: 400
     else 항목 있음
-        loop 각 주문 항목
-            Facade->>DB: SELECT product WHERE id = productId
-            DB-->>Facade: product | null
-            alt 상품 없음 또는 삭제됨
+        Facade->>DB: SELECT products WHERE id IN (productIds)
+        DB-->>Facade: products
+        alt 상품 없음 또는 삭제됨
+            Facade-->>Controller: CoreException(NOT_FOUND)
+            Controller-->>Client: 404
+        end
+
+        alt couponId 제공된 경우
+            Facade->>DB: SELECT coupon_issue WHERE id = couponId
+            DB-->>Facade: couponIssue | null
+            alt 발급 쿠폰 없음
                 Facade-->>Controller: CoreException(NOT_FOUND)
                 Controller-->>Client: 404
             end
+            alt 타 유저 소유 쿠폰
+                Facade-->>Controller: CoreException(FORBIDDEN)
+                Controller-->>Client: 403
+            end
+            alt 이미 사용된 쿠폰 또는 만료된 쿠폰
+                Facade-->>Controller: CoreException(BAD_REQUEST)
+                Controller-->>Client: 400
+            end
+            Note over Facade: CouponIssueModel.use() → status = USED
+            Facade->>DB: UPDATE coupon_issues SET status = 'USED'
         end
-        Note over Facade: OrderService.createOrder() → 스냅샷 생성 (순수 도메인 로직)
+
+        Note over Facade: OrderService.createOrder() → 금액 스냅샷 생성
         Facade->>DB: INSERT order + orderItems
         Controller-->>Client: 200
     end
@@ -320,6 +338,170 @@ sequenceDiagram
         else 본인의 주문
             Controller-->>Client: 200
         end
+    end
+    deactivate Facade
+    deactivate Controller
+```
+
+---
+
+## 시나리오 9. 쿠폰 (고객)
+
+### 9-1. 쿠폰 발급
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant Controller
+    participant Facade
+    participant DB
+
+    Client->>+Controller: POST /api/v1/coupons/{couponId}/issue
+    Controller->>+Facade: issueCoupon(userId, couponId)
+    Facade->>DB: SELECT coupon WHERE id = couponId
+    DB-->>Facade: coupon | null
+
+    alt 쿠폰 없음 또는 삭제됨
+        Facade-->>Controller: CoreException(NOT_FOUND)
+        Controller-->>Client: 404
+    else 쿠폰 존재
+        alt 만료된 쿠폰
+            Facade-->>Controller: CoreException(BAD_REQUEST)
+            Controller-->>Client: 400
+        else 유효한 쿠폰
+            Facade->>DB: SELECT coupon_issue WHERE couponId AND userId
+            DB-->>Facade: couponIssue | null
+            alt 이미 발급받은 쿠폰
+                Facade-->>Controller: CoreException(CONFLICT)
+                Controller-->>Client: 409
+            else 미발급
+                Facade->>DB: INSERT coupon_issue (status = AVAILABLE)
+                Controller-->>Client: 200
+            end
+        end
+    end
+    deactivate Facade
+    deactivate Controller
+```
+
+### 9-2. 내 쿠폰 목록 조회
+
+```mermaid
+sequenceDiagram
+    actor Client
+    participant Controller
+    participant Facade
+    participant DB
+
+    Client->>+Controller: GET /api/v1/users/me/coupons
+    Controller->>+Facade: getMyCoupons(userId)
+    Facade->>DB: SELECT coupon_issues WHERE userId
+    DB-->>Facade: couponIssues
+    Facade->>DB: SELECT coupons WHERE id IN (couponIds)
+    DB-->>Facade: coupons
+    Note over Facade: status 계산 (USED → USED, expiredAt 초과 → EXPIRED, 그 외 → AVAILABLE)
+    deactivate Facade
+    Controller-->>-Client: 200
+```
+
+---
+
+## 시나리오 10. 쿠폰 관리 (어드민)
+
+### 10-1. 쿠폰 템플릿 등록
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Controller
+    participant Facade
+    participant DB
+
+    Admin->>+Controller: POST /api-admin/v1/coupons
+    Controller->>+Facade: createCoupon(name, type, value, minOrderAmount, expiredAt)
+
+    alt 필수 입력값 누락 또는 유효하지 않은 값
+        Facade-->>Controller: CoreException(BAD_REQUEST)
+        Controller-->>Admin: 400
+    else 유효한 입력
+        Facade->>DB: INSERT coupon
+        Controller-->>Admin: 200
+    end
+    deactivate Facade
+    deactivate Controller
+```
+
+### 10-2. 쿠폰 템플릿 수정
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Controller
+    participant Facade
+    participant DB
+
+    Admin->>+Controller: PUT /api-admin/v1/coupons/{couponId}
+    Controller->>+Facade: updateCoupon(couponId, name, value, minOrderAmount, expiredAt)
+    Facade->>DB: SELECT coupon WHERE id = couponId
+    DB-->>Facade: coupon | null
+
+    alt 쿠폰 없음 또는 삭제됨
+        Facade-->>Controller: CoreException(NOT_FOUND)
+        Controller-->>Admin: 404
+    else 쿠폰 존재
+        Facade->>DB: UPDATE coupon
+        Controller-->>Admin: 200
+    end
+    deactivate Facade
+    deactivate Controller
+```
+
+### 10-3. 쿠폰 템플릿 삭제
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Controller
+    participant Facade
+    participant DB
+
+    Admin->>+Controller: DELETE /api-admin/v1/coupons/{couponId}
+    Controller->>+Facade: deleteCoupon(couponId)
+    Facade->>DB: SELECT coupon WHERE id = couponId
+    DB-->>Facade: coupon | null
+
+    alt 쿠폰 없음 또는 삭제됨
+        Facade-->>Controller: CoreException(NOT_FOUND)
+        Controller-->>Admin: 404
+    else 쿠폰 존재
+        Facade->>DB: UPDATE coupon (soft delete)
+        Controller-->>Admin: 200
+    end
+    deactivate Facade
+    deactivate Controller
+```
+
+### 10-4. 발급 내역 조회
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Controller
+    participant Facade
+    participant DB
+
+    Admin->>+Controller: GET /api-admin/v1/coupons/{couponId}/issues
+    Controller->>+Facade: getCouponIssues(couponId, page, size)
+    Facade->>DB: SELECT coupon WHERE id = couponId
+    DB-->>Facade: coupon | null
+
+    alt 쿠폰 없음 또는 삭제됨
+        Facade-->>Controller: CoreException(NOT_FOUND)
+        Controller-->>Admin: 404
+    else 쿠폰 존재
+        Facade->>DB: SELECT coupon_issues WHERE couponId (paging)
+        DB-->>Facade: couponIssues
+        Controller-->>Admin: 200
     end
     deactivate Facade
     deactivate Controller
