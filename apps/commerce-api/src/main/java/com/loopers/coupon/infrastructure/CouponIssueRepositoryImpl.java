@@ -36,6 +36,11 @@ public class CouponIssueRepositoryImpl implements CouponIssueRepository {
     }
 
     @Override
+    public Optional<CouponIssueModel> findByUserIdAndCouponIdWithLock(Long userId, Long couponId) {
+        return couponIssueJpaRepository.findByUserIdAndCouponIdForUpdate(userId, couponId);
+    }
+
+    @Override
     public List<CouponIssueModel> findAllByUserId(Long userId) {
         return couponIssueJpaRepository.findAllByUserIdOrderByCreatedAtDesc(userId);
     }

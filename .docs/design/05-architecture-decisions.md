@@ -801,3 +801,53 @@ findByIdWithLock(id)              → SELECT ... FOR UPDATE
 ```
 
 > 규칙: `@Lock(PESSIMISTIC_WRITE)`는 반드시 전용 메서드(`ForUpdate` / `WithLock` 접미사)로 격리하고, 기존 조회 메서드에 덮어쓰지 않는다.
+
+---
+
+## 결정 15. 쿠폰 소비 시점 변경 — `startPayment` → `createOrder`
+
+> 결정 13의 쿠폰 처리 시점을 수정한다.
+
+**결정**
+- 쿠폰 락 획득 + `use()` + 저장을 `createOrder()` 트랜잭션 안으로 이동한다.
+- `CouponIssueRepository`에 `findByUserIdAndCouponIdWithLock()` 메서드를 추가한다.
+- `startPayment()`에서 쿠폰 처리 블록을 제거한다.
+
+**배경 (결정 13의 허점)**
+
+결정 13에서는 `createOrder()`에서 쿠폰 상태를 조회만 하고(`findByUserIdAndCouponId`), 실제 소비(`use()`)는 `startPayment()`에서 수행했다. 이 구조에서는 `createOrder()` 트랜잭션이 커밋될 때 쿠폰 락이 없으므로, 두 요청이 동시에 `AVAILABLE` 상태를 확인한 뒤 각자 주문을 생성할 수 있다.
+
+```
+Thread 1: createOrder(couponId=42) → AVAILABLE 확인 → 주문1 저장  ← 락 없음
+Thread 2: createOrder(couponId=42) → AVAILABLE 확인 → 주문2 저장  ← 통과됨
+→ 동일 쿠폰으로 주문 2개가 DB에 존재 (고아 주문 발생)
+```
+
+요구사항 "주문 성공 시 해당 쿠폰은 즉시 USED 상태로 변경"과도 불일치한다.
+
+**변경된 결제 플로우**
+
+```
+POST /orders              → 쿠폰 락 + USED 처리 + 주문 저장  [단일 @Transactional]
+POST /orders/{id}/pay/start → 재고 reserve                  [단일 @Transactional]
+POST /orders/{id}/pay/confirm → 재고 confirm + CONFIRMED    [단일 @Transactional]
+```
+
+**트레이드오프**
+
+| 항목 | 변경 전 (결정 13) | 변경 후 (결정 15) |
+|------|-----------------|-----------------|
+| 쿠폰 소비 시점 | `startPayment` | `createOrder` |
+| 주문 생성 원자성 | 쿠폰 상태 체크만 → 고아 주문 가능 | 락 + USED + 주문 저장이 한 트랜잭션 → 고아 주문 없음 |
+| 결제 실패 시 쿠폰 | `startPayment` 롤백으로 AVAILABLE 복원 | `createOrder` 롤백으로 AVAILABLE 복원 (동일하게 안전) |
+| 신규 락 메서드 | 불필요 | `findByUserIdAndCouponIdWithLock()` 추가 필요 |
+
+**락 적용 위치 변경 (결정 14 보완)**
+
+```
+// 제거
+CouponIssueJpaRepository.findByIdForUpdate  ← startPayment에서 사용하던 락
+
+// 추가
+CouponIssueJpaRepository.findByUserIdAndCouponIdForUpdate  ← createOrder에서 사용할 락
+```

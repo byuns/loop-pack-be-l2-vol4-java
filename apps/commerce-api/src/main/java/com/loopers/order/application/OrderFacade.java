@@ -4,7 +4,6 @@ import com.loopers.coupon.domain.CouponIssueModel;
 import com.loopers.coupon.domain.CouponIssueRepository;
 import com.loopers.coupon.domain.CouponModel;
 import com.loopers.coupon.domain.CouponRepository;
-import com.loopers.coupon.domain.CouponStatus;
 import com.loopers.order.domain.OrderItemModel;
 import com.loopers.order.domain.OrderModel;
 import com.loopers.order.domain.OrderRepository;
@@ -13,7 +12,6 @@ import com.loopers.product.domain.ProductModel;
 import com.loopers.product.domain.ProductRepository;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
-import com.loopers.stock.domain.StockService;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import lombok.RequiredArgsConstructor;
@@ -36,7 +34,6 @@ public class OrderFacade {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
     private final StockRepository stockRepository;
-    private final StockService stockService;
     private final CouponRepository couponRepository;
     private final CouponIssueRepository couponIssueRepository;
 
@@ -71,11 +68,10 @@ public class OrderFacade {
             if (coupon.isExpired()) {
                 throw new CoreException(ErrorType.BAD_REQUEST, "만료된 쿠폰입니다.");
             }
-            CouponIssueModel couponIssue = couponIssueRepository.findByUserIdAndCouponId(userId, couponId)
+            CouponIssueModel couponIssue = couponIssueRepository.findByUserIdAndCouponIdWithLock(userId, couponId)
                 .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "보유하지 않은 쿠폰입니다."));
-            if (couponIssue.getStatus() != CouponStatus.AVAILABLE) {
-                throw new CoreException(ErrorType.BAD_REQUEST, "사용 불가능한 쿠폰입니다.");
-            }
+            couponIssue.use();
+            couponIssueRepository.save(couponIssue);
 
             long originalAmount = products.stream()
                 .mapToLong(p -> p.getPrice() * quantities.getOrDefault(p.getId(), 0))
@@ -111,13 +107,6 @@ public class OrderFacade {
 
         stocks.forEach(stock -> stock.reserve(quantities.get(stock.getProductId())));
         stocks.forEach(stockRepository::save);
-
-        if (order.getCouponIssueId() != null) {
-            CouponIssueModel couponIssue = couponIssueRepository.findByIdWithLock(order.getCouponIssueId())
-                .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "쿠폰 발급 정보가 존재하지 않습니다."));
-            couponIssue.use();
-            couponIssueRepository.save(couponIssue);
-        }
 
         return OrderInfo.from(order);
     }

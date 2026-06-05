@@ -18,6 +18,10 @@ public interface CouponIssueJpaRepository extends JpaRepository<CouponIssueModel
     @Query("SELECT c FROM CouponIssueModel c WHERE c.id = :id")
     Optional<CouponIssueModel> findByIdForUpdate(@Param("id") Long id);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT c FROM CouponIssueModel c WHERE c.userId = :userId AND c.couponId = :couponId")
+    Optional<CouponIssueModel> findByUserIdAndCouponIdForUpdate(@Param("userId") Long userId, @Param("couponId") Long couponId);
+
     Optional<CouponIssueModel> findByUserIdAndCouponId(Long userId, Long couponId);
 
     List<CouponIssueModel> findAllByUserIdOrderByCreatedAtDesc(Long userId);

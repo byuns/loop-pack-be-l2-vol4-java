@@ -83,9 +83,9 @@ class ConcurrencyIntegrationTest {
         assertThat(updated.getLikeCount()).isEqualTo(threadCount);
     }
 
-    @DisplayName("동일한 쿠폰으로 두 주문의 startPayment를 동시에 요청하면, 쿠폰은 단 한번만 사용된다.")
+    @DisplayName("동일한 쿠폰으로 두 createOrder가 동시에 요청되면, 쿠폰은 단 한번만 사용된다.")
     @Test
-    void coupon_isUsedOnlyOnce_whenConcurrentStartPaymentsWithSameCoupon() throws InterruptedException {
+    void coupon_isUsedOnlyOnce_whenConcurrentCreateOrdersWithSameCoupon() throws InterruptedException {
         // arrange
         ProductModel product = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
         stockJpaRepository.save(new StockModel(product.getId(), 100));
@@ -95,10 +95,6 @@ class ConcurrencyIntegrationTest {
         );
         CouponIssueModel issue = couponIssueJpaRepository.save(new CouponIssueModel(coupon.getId(), 1L));
 
-        // 동일 쿠폰으로 두 주문 생성 (createOrder 시점엔 쿠폰이 아직 AVAILABLE)
-        OrderInfo order1 = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)), coupon.getId());
-        OrderInfo order2 = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)), coupon.getId());
-
         int threadCount = 2;
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -107,11 +103,11 @@ class ConcurrencyIntegrationTest {
         AtomicInteger failCount = new AtomicInteger(0);
 
         // act
-        for (Long orderId : List.of(order1.id(), order2.id())) {
+        for (int i = 0; i < threadCount; i++) {
             executor.submit(() -> {
                 try {
                     startLatch.await();
-                    orderFacade.startPayment(1L, orderId);
+                    orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)), coupon.getId());
                     successCount.incrementAndGet();
                 } catch (Exception ignored) {
                     failCount.incrementAndGet();

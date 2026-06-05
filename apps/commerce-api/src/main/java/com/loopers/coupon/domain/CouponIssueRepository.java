@@ -8,6 +8,7 @@ public interface CouponIssueRepository {
     Optional<CouponIssueModel> findById(Long id);
     Optional<CouponIssueModel> findByIdWithLock(Long id);
     Optional<CouponIssueModel> findByUserIdAndCouponId(Long userId, Long couponId);
+    Optional<CouponIssueModel> findByUserIdAndCouponIdWithLock(Long userId, Long couponId);
     List<CouponIssueModel> findAllByUserId(Long userId);
     List<CouponIssueModel> findAllByCouponId(Long couponId, int page, int size);
 }
