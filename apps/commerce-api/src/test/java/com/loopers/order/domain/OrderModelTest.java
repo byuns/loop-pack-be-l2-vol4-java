@@ -97,4 +97,51 @@ class OrderModelTest {
         }
     }
 
+    @DisplayName("결제를 시작(startPayment)할 때,")
+    @Nested
+    class StartPayment {
+
+        @DisplayName("PENDING_PAYMENT 상태이면, status가 IN_PAYMENT로 변경된다.")
+        @Test
+        void changesStatusToInPayment_whenStatusIsPendingPayment() {
+            // arrange
+            OrderModel order = new OrderModel(1L, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)));
+
+            // act
+            order.startPayment();
+
+            // assert
+            assertThat(order.getStatus()).isEqualTo(OrderStatus.IN_PAYMENT);
+        }
+
+        @DisplayName("IN_PAYMENT 상태이면, BAD_REQUEST 예외가 발생한다.")
+        @Test
+        void throwsBadRequest_whenStatusIsInPayment() {
+            // arrange
+            OrderModel order = new OrderModel(1L, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)));
+            order.startPayment();
+
+            // act
+            CoreException result = assertThrows(CoreException.class, order::startPayment);
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+        }
+
+        @DisplayName("CONFIRMED 상태이면, BAD_REQUEST 예외가 발생한다.")
+        @Test
+        void throwsBadRequest_whenStatusIsConfirmed() {
+            // arrange
+            OrderModel order = new OrderModel(1L, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)));
+            order.startPayment();
+            order.confirm();
+
+            // act
+            CoreException result = assertThrows(CoreException.class, order::startPayment);
+
+            // assert
+            assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+        }
+    }
+
 }

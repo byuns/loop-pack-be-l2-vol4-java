@@ -53,6 +53,13 @@ public class OrderModel extends BaseEntity {
         this.finalAmount = this.originalAmount - discountAmount;
     }
 
+    public void startPayment() {
+        if (this.status != OrderStatus.PENDING_PAYMENT) {
+            throw new CoreException(ErrorType.BAD_REQUEST, "결제를 시작할 수 없는 주문 상태입니다.");
+        }
+        this.status = OrderStatus.IN_PAYMENT;
+    }
+
     public void confirm() {
         this.status = OrderStatus.CONFIRMED;
     }

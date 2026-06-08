@@ -291,6 +291,40 @@ class OrderFacadeIntegrationTest {
             assertThat(exception.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
         }
 
+        @DisplayName("정상 요청이면, 주문 상태가 IN_PAYMENT로 변경된다.")
+        @Test
+        void changesStatusToInPayment_whenRequestIsValid() {
+            // arrange
+            ProductModel product = savedProduct(100);
+            OrderInfo order = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)));
+
+            // act
+            OrderInfo result = orderFacade.startPayment(1L, order.id());
+
+            // assert
+            assertThat(result.status()).isEqualTo(OrderStatus.IN_PAYMENT.name());
+        }
+
+        @DisplayName("이미 IN_PAYMENT 상태인 주문이면, BAD_REQUEST 예외가 발생하고 재고가 중복 선점되지 않는다.")
+        @Test
+        void throwsBadRequest_andDoesNotReserveStockAgain_whenStartPaymentIsCalledTwice() {
+            // arrange
+            ProductModel product = savedProduct(100);
+            OrderInfo order = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 5)));
+            orderFacade.startPayment(1L, order.id());
+
+            // act
+            CoreException exception = assertThrows(CoreException.class, () ->
+                orderFacade.startPayment(1L, order.id())
+            );
+
+            // assert
+            assertThat(exception.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
+
+            StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
+            assertThat(stock.getReservedStock()).isEqualTo(5);
+        }
+
         @DisplayName("다른 유저의 주문이면, FORBIDDEN 예외가 발생한다.")
         @Test
         void throwsForbidden_whenOrderBelongsToAnotherUser() {

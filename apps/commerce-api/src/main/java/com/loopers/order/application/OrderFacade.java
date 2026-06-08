@@ -116,6 +116,9 @@ public class OrderFacade {
             throw new CoreException(ErrorType.NOT_FOUND, "재고 정보가 없는 상품이 포함되어 있습니다.");
         }
 
+        order.startPayment();
+        orderRepository.save(order);
+
         stocks.forEach(stock -> stock.reserve(quantities.get(stock.getProductId())));
         stocks.forEach(stockRepository::save);
 
