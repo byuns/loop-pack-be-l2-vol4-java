@@ -81,9 +81,9 @@ class OrderV1ApiE2ETest {
     @Nested
     class CreateOrder {
 
-        @DisplayName("정상 요청이면, 200 OK와 PENDING_PAYMENT 상태의 OrderResponse를 반환하며 재고 변동이 없다.")
+        @DisplayName("정상 요청이면, 200 OK와 PENDING_PAYMENT 상태의 OrderResponse를 반환하며 재고가 즉시 선점된다.")
         @Test
-        void returnsOrderResponse_withPendingPaymentStatus_andNoStockChange_whenRequestIsValid() {
+        void returnsOrderResponse_withPendingPaymentStatus_andReservesStock_whenRequestIsValid() {
             // arrange
             ProductModel product = savedProduct(100);
             OrderV1Dto.CreateRequest request = new OrderV1Dto.CreateRequest(
@@ -103,7 +103,10 @@ class OrderV1ApiE2ETest {
             );
 
             StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
-            assertThat(stock.availableStock()).isEqualTo(100);
+            assertAll(
+                () -> assertThat(stock.getReservedStock()).isEqualTo(2),
+                () -> assertThat(stock.availableStock()).isEqualTo(98)
+            );
         }
 
         @DisplayName("존재하지 않는 productId가 포함되면, 404 Not Found를 반환한다.")

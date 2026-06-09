@@ -59,16 +59,13 @@ public class OrderFacade {
             throw new CoreException(ErrorType.NOT_FOUND, "존재하지 않는 상품이 포함되어 있습니다.");
         }
 
-        Map<Long, StockModel> stockMap = stockRepository.findAllByProductIds(productIds).stream()
+        List<StockModel> stocks = stockRepository.findAllByProductIdsWithLock(productIds);
+        Map<Long, StockModel> stockMap = stocks.stream()
             .collect(Collectors.toMap(StockModel::getProductId, Function.identity()));
         if (!stockMap.keySet().containsAll(quantities.keySet())) {
             throw new CoreException(ErrorType.NOT_FOUND, "재고 정보가 없는 상품이 포함되어 있습니다.");
         }
-        quantities.forEach((productId, qty) -> {
-            if (stockMap.get(productId).availableStock() < qty) {
-                throw new CoreException(ErrorType.BAD_REQUEST, "재고가 부족합니다.");
-            }
-        });
+        quantities.forEach((productId, qty) -> stockMap.get(productId).reserve(qty));
 
         CouponModel coupon = null;
         Long couponIssueId = null;
@@ -87,36 +84,18 @@ public class OrderFacade {
         }
 
         OrderModel order = orderService.createOrder(userId, products, quantities, coupon, couponIssueId);
-        return OrderInfo.from(orderRepository.save(order));
+        // [fix] save() 반환값을 사용해야 JPA가 부여한 ID가 반영됨
+        OrderModel savedOrder = orderRepository.save(order);
+        stocks.forEach(stockRepository::save);
+        return OrderInfo.from(savedOrder);
     }
 
     @Transactional
     public OrderInfo startPayment(Long userId, Long orderId) {
         OrderModel order = orderService.getOrThrow(orderRepository.find(orderId));
         orderService.checkOwnership(order, userId);
-
-        Map<Long, Integer> quantities = order.getItems().stream()
-            .collect(Collectors.toMap(OrderItemModel::getProductId, OrderItemModel::getQuantity));
-
-        List<Long> productIds = order.getItems().stream()
-            .map(OrderItemModel::getProductId)
-            .toList();
-
-        List<StockModel> stocks = stockRepository.findAllByProductIdsWithLock(productIds);
-        Map<Long, StockModel> stockMap = stocks.stream()
-            .collect(Collectors.toMap(StockModel::getProductId, Function.identity()));
-
-        // [fix] 재고 레코드 없는 상품이 포함되어도 예외 없이 통과하던 버그 수정
-        if (!stockMap.keySet().containsAll(quantities.keySet())) {
-            throw new CoreException(ErrorType.NOT_FOUND, "재고 정보가 없는 상품이 포함되어 있습니다.");
-        }
-
         order.startPayment();
         orderRepository.save(order);
-
-        stocks.forEach(stock -> stock.reserve(quantities.get(stock.getProductId())));
-        stocks.forEach(stockRepository::save);
-
         return OrderInfo.from(order);
     }
 

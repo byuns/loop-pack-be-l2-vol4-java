@@ -76,9 +76,9 @@ class OrderFacadeIntegrationTest {
     @Nested
     class CreateOrder {
 
-        @DisplayName("정상 요청이면, PENDING_PAYMENT 상태로 저장되고 재고 변동이 없다.")
+        @DisplayName("정상 요청이면, PENDING_PAYMENT 상태로 저장되고 재고가 즉시 선점된다.")
         @Test
-        void returnsOrderInfo_withPendingPaymentStatus_andNoStockChange_whenRequestIsValid() {
+        void returnsOrderInfo_andReservesStock_whenRequestIsValid() {
             // arrange
             ProductModel product = savedProduct(100);
 
@@ -93,7 +93,10 @@ class OrderFacadeIntegrationTest {
             );
 
             StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
-            assertThat(stock.availableStock()).isEqualTo(100);
+            assertAll(
+                () -> assertThat(stock.getReservedStock()).isEqualTo(2),
+                () -> assertThat(stock.availableStock()).isEqualTo(98)
+            );
         }
 
         @DisplayName("존재하지 않는 productId가 포함되면, NOT_FOUND 예외가 발생한다.")
@@ -255,27 +258,64 @@ class OrderFacadeIntegrationTest {
             // assert
             assertThat(exception.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
         }
+
+        @DisplayName("주문 생성이 완료되면, 쿠폰 상태가 즉시 USED로 변경된다.")
+        @Test
+        void changesCouponStatusToUsed_whenCreateOrderSucceeds() {
+            // arrange
+            ProductModel product = savedProduct(100);
+            CouponModel coupon = savedCoupon(CouponType.RATE, 10L, null, ZonedDateTime.now().plusDays(30));
+            CouponIssueModel issue = savedCouponIssue(coupon.getId(), 1L);
+
+            // act
+            orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)), coupon.getId());
+
+            // assert
+            CouponIssueModel updatedIssue = couponIssueJpaRepository.findById(issue.getId()).orElseThrow();
+            assertThat(updatedIssue.getStatus()).isEqualTo(CouponStatus.USED);
+        }
+
+        @DisplayName("쿠폰이 미보유 상태로 주문 생성이 실패하면, 재고 선점이 롤백된다.")
+        @Test
+        void rollsBackStockReservation_whenCouponIsNotOwned() {
+            // arrange
+            ProductModel product = savedProduct(100);
+            CouponModel coupon = savedCoupon(CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
+            // 쿠폰 미발급: userId=1은 해당 쿠폰 미보유
+
+            // act
+            assertThrows(CoreException.class, () ->
+                orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 5)), coupon.getId())
+            );
+
+            // assert
+            StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
+            assertThat(stock.getReservedStock()).isEqualTo(0);
+        }
     }
 
     @DisplayName("결제를 시작(startPayment)할 때,")
     @Nested
     class StartPayment {
 
-        @DisplayName("정상 요청이면, 재고가 선점된다.")
+        @DisplayName("정상 요청이면, createOrder에서 선점된 재고에 변동이 없다.")
         @Test
-        void reservesStock_whenRequestIsValid() {
+        void doesNotChangeStockReservation_whenRequestIsValid() {
             // arrange
             ProductModel product = savedProduct(100);
             OrderInfo order = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 5)));
+
+            StockModel stockAfterCreate = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
+            assertThat(stockAfterCreate.getReservedStock()).isEqualTo(5);
 
             // act
             orderFacade.startPayment(1L, order.id());
 
             // assert
-            StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
+            StockModel stockAfterStart = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
             assertAll(
-                () -> assertThat(stock.getReservedStock()).isEqualTo(5),
-                () -> assertThat(stock.availableStock()).isEqualTo(95)
+                () -> assertThat(stockAfterStart.getReservedStock()).isEqualTo(5),
+                () -> assertThat(stockAfterStart.availableStock()).isEqualTo(95)
             );
         }
 
@@ -339,25 +379,6 @@ class OrderFacadeIntegrationTest {
 
             // assert
             assertThat(exception.getErrorType()).isEqualTo(ErrorType.FORBIDDEN);
-        }
-
-        @DisplayName("쿠폰이 적용된 주문이면, startPayment 성공 후 쿠폰 상태가 USED로 변경된다.")
-        @Test
-        void changesCouponStatusToUsed_whenStartPaymentSucceedsWithCoupon() {
-            // arrange
-            ProductModel product = savedProduct(100);
-            CouponModel coupon = savedCoupon(CouponType.RATE, 10L, null, ZonedDateTime.now().plusDays(30));
-            CouponIssueModel issue = savedCouponIssue(coupon.getId(), 1L);
-            OrderInfo order = orderFacade.createOrder(
-                1L, List.of(new OrderItemCommand(product.getId(), 1)), coupon.getId()
-            );
-
-            // act
-            orderFacade.startPayment(1L, order.id());
-
-            // assert
-            CouponIssueModel updatedIssue = couponIssueJpaRepository.findById(issue.getId()).orElseThrow();
-            assertThat(updatedIssue.getStatus()).isEqualTo(CouponStatus.USED);
         }
 
     }

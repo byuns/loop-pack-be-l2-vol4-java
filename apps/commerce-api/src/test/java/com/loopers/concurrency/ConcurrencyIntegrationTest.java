@@ -8,7 +8,6 @@ import com.loopers.coupon.infrastructure.CouponJpaRepository;
 import com.loopers.coupon.domain.CouponIssueModel;
 import com.loopers.like.application.LikeFacade;
 import com.loopers.order.application.OrderFacade;
-import com.loopers.order.application.OrderInfo;
 import com.loopers.order.application.OrderItemCommand;
 import com.loopers.product.domain.ProductModel;
 import com.loopers.product.infrastructure.ProductJpaRepository;
@@ -22,7 +21,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -127,20 +125,14 @@ class ConcurrencyIntegrationTest {
         assertThat(updatedIssue.getStatus()).isEqualTo(CouponStatus.USED);
     }
 
-    @DisplayName("재고 5개 상품에 10건의 startPayment가 동시에 요청되면, 5건만 성공하고 재고는 0이 된다.")
+    @DisplayName("재고 5개 상품에 10건의 createOrder가 동시에 요청되면, 5건만 성공하고 가용 재고는 0이 된다.")
     @Test
-    void stock_isDecrementedCorrectly_whenConcurrentStartPayments() throws InterruptedException {
+    void stock_isReservedCorrectly_whenConcurrentCreateOrders() throws InterruptedException {
         // arrange
         int stock = 5;
         int threadCount = 10;
         ProductModel product = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
         stockJpaRepository.save(new StockModel(product.getId(), stock));
-
-        List<Long> orderIds = new ArrayList<>();
-        for (int i = 0; i < threadCount; i++) {
-            OrderInfo order = orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)));
-            orderIds.add(order.id());
-        }
 
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -149,11 +141,11 @@ class ConcurrencyIntegrationTest {
         AtomicInteger failCount = new AtomicInteger(0);
 
         // act
-        for (Long orderId : orderIds) {
+        for (int i = 0; i < threadCount; i++) {
             executor.submit(() -> {
                 try {
                     startLatch.await();
-                    orderFacade.startPayment(1L, orderId);
+                    orderFacade.createOrder(1L, List.of(new OrderItemCommand(product.getId(), 1)));
                     successCount.incrementAndGet();
                 } catch (Exception ignored) {
                     failCount.incrementAndGet();
