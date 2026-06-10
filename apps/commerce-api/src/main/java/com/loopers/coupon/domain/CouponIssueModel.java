@@ -40,10 +40,4 @@ public class CouponIssueModel extends BaseEntity {
         this.status = CouponStatus.AVAILABLE;
     }
 
-    public void use() {
-        if (this.status == CouponStatus.USED) {
-            throw new CoreException(ErrorType.BAD_REQUEST, "이미 사용된 쿠폰입니다.");
-        }
-        this.status = CouponStatus.USED;
-    }
 }

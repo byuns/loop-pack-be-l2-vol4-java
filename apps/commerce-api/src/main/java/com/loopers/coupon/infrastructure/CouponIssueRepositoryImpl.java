@@ -2,6 +2,7 @@ package com.loopers.coupon.infrastructure;
 
 import com.loopers.coupon.domain.CouponIssueModel;
 import com.loopers.coupon.domain.CouponIssueRepository;
+import com.loopers.coupon.domain.CouponStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Component;
@@ -26,18 +27,15 @@ public class CouponIssueRepositoryImpl implements CouponIssueRepository {
     }
 
     @Override
-    public Optional<CouponIssueModel> findByIdWithLock(Long id) {
-        return couponIssueJpaRepository.findByIdForUpdate(id);
-    }
-
-    @Override
     public Optional<CouponIssueModel> findByUserIdAndCouponId(Long userId, Long couponId) {
         return couponIssueJpaRepository.findByUserIdAndCouponId(userId, couponId);
     }
 
     @Override
-    public Optional<CouponIssueModel> findByUserIdAndCouponIdWithLock(Long userId, Long couponId) {
-        return couponIssueJpaRepository.findByUserIdAndCouponIdForUpdate(userId, couponId);
+    public int useIfAvailable(Long couponIssueId) {
+        return couponIssueJpaRepository.updateStatusIfAvailable(
+            couponIssueId, CouponStatus.USED, CouponStatus.AVAILABLE
+        );
     }
 
     @Override

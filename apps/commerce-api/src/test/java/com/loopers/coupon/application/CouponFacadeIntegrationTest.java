@@ -409,8 +409,7 @@ class CouponFacadeIntegrationTest {
             CouponIssueInfo issued = couponFacade.issueCoupon(coupon.id(), 1L);
             com.loopers.coupon.domain.CouponIssueModel issueModel =
                 couponIssueJpaRepository.findById(issued.id()).orElseThrow();
-            issueModel.use();
-            couponIssueJpaRepository.save(issueModel);
+            couponIssueJpaRepository.updateStatusIfAvailable(issueModel.getId(), CouponStatus.USED, CouponStatus.AVAILABLE);
 
             // act
             List<CouponIssueInfo> result = couponFacade.getMyCoupons(1L);

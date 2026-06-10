@@ -230,8 +230,7 @@ class OrderFacadeIntegrationTest {
             ProductModel product = savedProduct(100);
             CouponModel coupon = savedCoupon(CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
             CouponIssueModel issue = savedCouponIssue(coupon.getId(), 1L);
-            issue.use();
-            couponIssueJpaRepository.save(issue);
+            couponIssueJpaRepository.updateStatusIfAvailable(issue.getId(), CouponStatus.USED, CouponStatus.AVAILABLE);
 
             // act
             CoreException exception = assertThrows(CoreException.class, () ->

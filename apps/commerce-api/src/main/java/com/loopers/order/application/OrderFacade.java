@@ -76,10 +76,11 @@ public class OrderFacade {
             if (coupon.isExpired()) {
                 throw new CoreException(ErrorType.BAD_REQUEST, "만료된 쿠폰입니다.");
             }
-            CouponIssueModel couponIssue = couponIssueRepository.findByUserIdAndCouponIdWithLock(userId, couponId)
+            CouponIssueModel couponIssue = couponIssueRepository.findByUserIdAndCouponId(userId, couponId)
                 .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "보유하지 않은 쿠폰입니다."));
-            couponIssue.use();
-            couponIssueRepository.save(couponIssue);
+            if (couponIssueRepository.useIfAvailable(couponIssue.getId()) == 0) {
+                throw new CoreException(ErrorType.BAD_REQUEST, "이미 사용된 쿠폰입니다.");
+            }
             couponIssueId = couponIssue.getId();
         }
 

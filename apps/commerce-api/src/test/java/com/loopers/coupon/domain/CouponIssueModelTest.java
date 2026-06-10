@@ -50,35 +50,4 @@ class CouponIssueModelTest {
         }
     }
 
-    @DisplayName("use를 호출할 때,")
-    @Nested
-    class Use {
-
-        @DisplayName("AVAILABLE 상태이면, status가 USED로 변경된다.")
-        @Test
-        void changesStatusToUsed_whenStatusIsAvailable() {
-            // arrange
-            CouponIssueModel issue = new CouponIssueModel(1L, 1L);
-
-            // act
-            issue.use();
-
-            // assert
-            assertThat(issue.getStatus()).isEqualTo(CouponStatus.USED);
-        }
-
-        @DisplayName("이미 USED 상태이면, BAD_REQUEST 예외가 발생한다.")
-        @Test
-        void throwsBadRequest_whenAlreadyUsed() {
-            // arrange
-            CouponIssueModel issue = new CouponIssueModel(1L, 1L);
-            issue.use();
-
-            // act
-            CoreException exception = assertThrows(CoreException.class, issue::use);
-
-            // assert
-            assertThat(exception.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
-        }
-    }
 }

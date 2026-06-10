@@ -1,11 +1,12 @@
 package com.loopers.coupon.infrastructure;
 
 import com.loopers.coupon.domain.CouponIssueModel;
-import jakarta.persistence.LockModeType;
+import com.loopers.coupon.domain.CouponStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -14,15 +15,14 @@ import java.util.Optional;
 
 public interface CouponIssueJpaRepository extends JpaRepository<CouponIssueModel, Long> {
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT c FROM CouponIssueModel c WHERE c.id = :id")
-    Optional<CouponIssueModel> findByIdForUpdate(@Param("id") Long id);
-
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT c FROM CouponIssueModel c WHERE c.userId = :userId AND c.couponId = :couponId")
-    Optional<CouponIssueModel> findByUserIdAndCouponIdForUpdate(@Param("userId") Long userId, @Param("couponId") Long couponId);
-
     Optional<CouponIssueModel> findByUserIdAndCouponId(Long userId, Long couponId);
+
+    @Transactional
+    @Modifying
+    @Query("UPDATE CouponIssueModel c SET c.status = :newStatus WHERE c.id = :id AND c.status = :curStatus")
+    int updateStatusIfAvailable(@Param("id") Long id,
+                                @Param("newStatus") CouponStatus newStatus,
+                                @Param("curStatus") CouponStatus curStatus);
 
     List<CouponIssueModel> findAllByUserIdOrderByCreatedAtDesc(Long userId);
 
