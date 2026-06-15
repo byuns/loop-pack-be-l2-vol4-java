@@ -81,9 +81,9 @@ class OrderV1ApiE2ETest {
     @Nested
     class CreateOrder {
 
-        @DisplayName("정상 요청이면, 200 OK와 PENDING_PAYMENT 상태의 OrderResponse를 반환하며 재고 변동이 없다.")
+        @DisplayName("정상 요청이면, 200 OK와 PENDING_PAYMENT 상태의 OrderResponse를 반환하며 재고가 즉시 선점된다.")
         @Test
-        void returnsOrderResponse_withPendingPaymentStatus_andNoStockChange_whenRequestIsValid() {
+        void returnsOrderResponse_withPendingPaymentStatus_andReservesStock_whenRequestIsValid() {
             // arrange
             ProductModel product = savedProduct(100);
             OrderV1Dto.CreateRequest request = new OrderV1Dto.CreateRequest(
@@ -103,7 +103,10 @@ class OrderV1ApiE2ETest {
             );
 
             StockModel stock = stockJpaRepository.findByProductId(product.getId()).orElseThrow();
-            assertThat(stock.availableStock()).isEqualTo(100);
+            assertAll(
+                () -> assertThat(stock.getReservedStock()).isEqualTo(2),
+                () -> assertThat(stock.availableStock()).isEqualTo(98)
+            );
         }
 
         @DisplayName("존재하지 않는 productId가 포함되면, 404 Not Found를 반환한다.")
@@ -169,6 +172,7 @@ class OrderV1ApiE2ETest {
             assertThat(stock.getReservedStock()).isEqualTo(5);
         }
 
+        // [fix] 재고 검증이 createOrder로 이동됨에 따라 POST /orders 단계에서 400 검증으로 변경
         @DisplayName("재고가 부족하면, 400 Bad Request를 반환한다.")
         @Test
         void returnsBadRequest_whenStockIsInsufficient() {
@@ -178,13 +182,10 @@ class OrderV1ApiE2ETest {
                 List.of(new OrderV1Dto.OrderItemRequest(product.getId(), 5))
             );
             ParameterizedTypeReference<ApiResponse<OrderV1Dto.OrderResponse>> responseType = new ParameterizedTypeReference<>() {};
-            Long orderId = testRestTemplate.exchange(
-                ENDPOINT, HttpMethod.POST, new HttpEntity<>(createRequest, authHeaders()), responseType
-            ).getBody().data().id();
 
             // act
             ResponseEntity<ApiResponse<OrderV1Dto.OrderResponse>> response =
-                testRestTemplate.exchange(ENDPOINT + "/" + orderId + "/pay/start", HttpMethod.POST, new HttpEntity<>(authHeaders()), responseType);
+                testRestTemplate.exchange(ENDPOINT, HttpMethod.POST, new HttpEntity<>(createRequest, authHeaders()), responseType);
 
             // assert
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);

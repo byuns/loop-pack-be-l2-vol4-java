@@ -34,6 +34,19 @@ classDiagram
         CONFIRMED
     }
 
+    class CouponType {
+        <<enumeration>>
+        FIXED
+        RATE
+    }
+
+    class CouponStatus {
+        <<enumeration>>
+        AVAILABLE
+        USED
+        EXPIRED
+    }
+
     class UserModel {
         +String loginId
         +String password
@@ -77,11 +90,36 @@ classDiagram
         +LikeModel(userId, productId)
     }
 
+    class CouponModel {
+        +String name
+        +CouponType type
+        +Long value
+        +Long minOrderAmount
+        +ZonedDateTime expiredAt
+        +CouponModel(name, type, value, minOrderAmount, expiredAt)
+        +calculateDiscount(orderAmount) long
+        +isExpired() boolean
+        +update(name, value, minOrderAmount, expiredAt) void
+    }
+
+    class CouponIssueModel {
+        +Long couponId
+        +Long userId
+        +CouponStatus status
+        +CouponIssueModel(couponId, userId)
+        +use() void
+        +isUsable() boolean
+    }
+
     class OrderModel {
         +Long userId
         +OrderStatus status
+        +Long couponIssueId
+        +Long originalAmount
+        +Long discountAmount
+        +Long finalAmount
         +List~OrderItemModel~ items
-        +OrderModel(userId, items)
+        +OrderModel(userId, couponIssueId, originalAmount, discountAmount, items)
         +confirm() void
     }
 
@@ -97,13 +135,17 @@ classDiagram
     SoftDeletableEntity <|-- UserModel
     SoftDeletableEntity <|-- BrandModel
     SoftDeletableEntity <|-- ProductModel
+    SoftDeletableEntity <|-- CouponModel
     BaseEntity <|-- StockModel
     BaseEntity <|-- LikeModel
     BaseEntity <|-- OrderModel
     BaseEntity <|-- OrderItemModel
+    BaseEntity <|-- CouponIssueModel
 
     UserModel --> Role
     OrderModel --> OrderStatus
+    CouponModel --> CouponType
+    CouponIssueModel --> CouponStatus
     UserModel "N" --> "0..1" BrandModel : "brandId (nullable)"
     ProductModel "N" --> "0..1" BrandModel : "brandId (nullable)"
     ProductModel "1" --> "1" StockModel : "productId"
@@ -112,6 +154,9 @@ classDiagram
     UserModel "1" --> "N" OrderModel
     OrderModel "1" *-- "N" OrderItemModel
     OrderItemModel ..> ProductModel : 스냅샷 참조
+    CouponModel "1" --> "N" CouponIssueModel : "couponId"
+    UserModel "1" --> "N" CouponIssueModel : "userId"
+    OrderModel ..> CouponIssueModel : "couponIssueId (nullable, 스냅샷 참조)"
 ```
 
 ---
@@ -137,8 +182,14 @@ classDiagram
 ### UserModel — role + brandId
 `role`은 `CUSTOMER`, `BRAND_ADMIN`, `SUPER_ADMIN` 세 가지 값을 갖는다. `brandId`는 `BRAND_ADMIN`일 때만 값이 존재하며, 나머지 역할에서는 null이다.
 
-### OrderModel — 주문 총액은 집계 쿼리
-주문 항목 수는 수십 개 수준이므로 `SUM(price * quantity)` 집계 부담이 크지 않다. 총액은 추후 결제 도메인 추가 시 계산 방식이 달라질 수 있어 지금 역정규화하지 않는다.
+### CouponModel — 할인 계산 캡슐화
+`calculateDiscount(orderAmount)`를 `CouponModel` 내부에 구현해 타입별(FIXED/RATE) 분기를 도메인 레이어에 가둔다. `minOrderAmount` 미충족 시 BAD_REQUEST 예외를 던진다. `FIXED` 타입은 `min(value, orderAmount)`로 음수를 방지하고, `RATE` 타입은 `orderAmount * value / 100`을 **버림(floor)**으로 처리한다. `value` 유효 범위는 FIXED: 1 이상, RATE: 1~100이며 생성자에서 검증한다. `type`은 생성 후 변경 불가이므로 `update()` 파라미터에 포함하지 않는다.
+
+### CouponIssueModel — 상태와 소유권
+`status`는 `AVAILABLE`(초기값)과 `USED`(사용 후)만 저장한다. `EXPIRED`는 `CouponModel.isExpired()`를 통해 조회 시점에 계산하며 DB에 저장하지 않는다. `use()`는 이미 사용된 쿠폰이면 BAD_REQUEST를 던진다.
+
+### OrderModel — 금액 스냅샷
+쿠폰 도입으로 주문에 `originalAmount`(쿠폰 적용 전 합계), `discountAmount`(할인 금액), `finalAmount`(최종 결제 금액)를 스냅샷으로 저장한다. 이후 쿠폰 정보가 바뀌어도 주문 기록의 금액은 변하지 않는다. `couponIssueId`는 어떤 발급 쿠폰이 사용됐는지 참조용으로 보관하며 FK 제약은 두지 않는다.
 
 ### LikeModel — 좋아요 취소 시 하드 딜리트
 좋아요 취소 시 레코드를 실제로 삭제한다. `userId + productId` 유니크 제약과 충돌 없이 재좋아요가 가능하고 구현이 단순하다. 요구사항에 좋아요 이력 조회가 없으므로 이력 손실은 무방하다.
