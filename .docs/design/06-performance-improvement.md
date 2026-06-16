@@ -11,7 +11,7 @@
 
 | # | 항목 | 상태 |
 |---|------|------|
-| ① | 상품 목록 조회 — 브랜드 필터 + 좋아요순 정렬 인덱스 최적화 | ⬜ |
+| ① | 상품 목록 조회 — 브랜드 필터 + 좋아요순 정렬 인덱스 최적화 | ✅ 완료 |
 | ② | 좋아요 수 정렬 구조 개선 — 비정규화(`like_count`) 또는 Materialized View | ✅ 완료 |
 | ③ | 상품 목록·상세 API Redis 캐시 적용 | ⬜ |
 
@@ -50,27 +50,108 @@ type: ALL  /  key: NULL  /  rows: 99,516  /  Extra: Using where; Using filesort
 
 브랜드 필터가 있어도 없어도 동일하게 풀스캔 + filesort 발생.
 
-### 필요 인덱스 설계
+### 고민했던 것들
+
+#### OR 조건 문제 → 쿼리 분리
+
+기존 쿼리:
+```sql
+WHERE deleted_at IS NULL AND (:brandId IS NULL OR brand_id = :brandId)
+```
+`OR :brandId IS NULL` 조건이 있으면 옵티마이저가 "brandId가 null일 수도 있다"고 판단해
+인덱스를 타지 않고 풀스캔을 선택한다. 브랜드 필터가 있든 없든 항상 풀스캔 발생.
+
+**해결:** `findAllActive` / `findAllActiveByBrandId` 두 메서드로 분리.
+호출부(`ProductRepositoryImpl`)에서 `brandId == null` 여부로 분기.
+
+#### deleted_at IS NULL을 인덱스에 포함하지 않은 이유
+
+`deleted_at IS NULL`은 삭제되지 않은 상품(= 거의 전체)에 해당하므로 selectivity가 매우 낮다.
+이 컬럼을 인덱스 선두에 두면 오히려 인덱스 효율이 떨어진다.
+정렬 조건(`like_count`, `created_at`, `brand_id`)이 이미 높은 selectivity를 가지므로 제외.
+
+#### like_count 인덱스 쓰기 비용 트레이드오프
+
+`like_count`는 좋아요 등록/취소마다 UPDATE되는 컬럼이다.
+인덱스가 있으면 매 UPDATE 시 인덱스도 갱신되므로 쓰기 비용이 증가한다.
+ㅍ
+**판단:** 좋아요순 조회가 핵심 기능이고 읽기 비용(풀스캔)이 훨씬 크기 때문에 인덱스 추가가 합리적.
+쓰기 비용 증가는 감수할 만한 수준.
+
+#### like_count 정합성 — Eventual Consistency 허용
+
+`likes` 테이블(원본)과 `products.like_count`(비정규화)가 동기화 중 불일치할 수 있다.
+원자 UPDATE(`like_count = like_count ± 1`)로 처리하지만, 장애 상황에서는 차이가 생길 수 있다.
+
+**판단:** 좋아요 수 정렬은 "대략적인 인기순"이 목적이므로 강정합성 불필요.
+일시적 불일치는 서비스에 큰 영향 없음 → Eventual Consistency 허용.
+
+#### brand_id nullable 유지 결정
+
+노브랜드 상품의 `brand_id`를 null로 둘지, "노브랜드" 전용 브랜드 레코드로 둘지 검토했다.
+
+**Option A — 현행 유지 (nullable)**
+- 노브랜드 상품 → `brand_id = NULL`
+- 브랜드 필터 조회: `WHERE brand_id = ?` / 전체 조회: `WHERE brand_id IS NULL OR brand_id = ?`
+- 단점: OR 조건으로 인해 옵티마이저가 인덱스를 타지 않음
+
+**Option B — Null Object Pattern (sentinel 값)**
+- 노브랜드 전용 브랜드 레코드를 하나 만들고 (`brands` 테이블에 "노브랜드" 행 삽입)
+- 노브랜드 상품 → `brand_id = {노브랜드 id}`
+- 브랜드 필터 조회: 항상 `WHERE brand_id = ?` 단일 조건 → OR 조건 불필요
+- 인덱스를 항상 탈 수 있음
+
+**판단 — Option A 유지**
+
+이번에 쿼리를 `findAllActive` / `findAllActiveByBrandId` 두 개로 분리하면서
+OR 조건 문제는 이미 해결됐다. 브랜드 필터가 없는 경우 OR 조건 자체가 존재하지 않으므로
+Option B로 데이터 모델을 바꿀 이유가 없어졌다.
+
+Option B는 "브랜드 없음"이라는 의미를 코드와 DB 양쪽에서 별도로 관리해야 하는 복잡도가 생기므로,
+쿼리 분리만으로 해결된 현 시점에서는 오버엔지니어링이다.
+
+### 인덱스 설계
+
+실제 적용한 인덱스:
 
 | 인덱스명 | 컬럼 | 커버 케이스 |
 |----------|------|------------|
 | `idx_products_likes_desc` | `(like_count DESC, created_at DESC)` | 브랜드 필터 없이 전체 좋아요순 |
 | `idx_products_brand_likes` | `(brand_id, like_count DESC, created_at DESC)` | 브랜드 필터 + 좋아요순 |
-| `idx_products_price_asc` | `(deleted_at, price ASC)` | 가격 오름차순 정렬 |
-| `idx_products_latest` | `(deleted_at, created_at DESC)` | 최신순 정렬 |
 
-> 04-erd.md의 인덱스 전략 참고 (이미 설계되어 있던 항목과 일치)
+PRICE_ASC / LATEST 정렬은 `deleted_at IS NULL` selectivity 문제로 별도 인덱스 불필요.
+현재 트래픽 기준 좋아요순이 핵심 케이스이므로 위 두 가지만 적용.
 
 ### 인덱스 추가 방법
 
 `ddl-auto: create` 환경이므로 `@Table(indexes = ...)` 어노테이션으로 관리.
 재시작 시 스키마 재생성 → 인덱스 자동 생성 → `ProductDataInitializer`로 데이터 재투입.
 
+### TO-BE 실행계획 (인덱스 적용 후)
+
+**브랜드 필터 없음 + 좋아요순:**
+```
+type: index  /  key: idx_products_likes_desc  /  rows: 20  /  Extra: Using where
+```
+
+**브랜드 필터 있음 + 좋아요순:**
+```
+type: ref  /  key: idx_products_brand_likes  /  rows: 9,116  /  Extra: Using where
+```
+
+### AS-IS vs TO-BE 비교
+
+| 케이스 | AS-IS type | TO-BE type | AS-IS rows | TO-BE rows | filesort |
+|--------|-----------|-----------|-----------|-----------|---------|
+| 전체 좋아요순 | `ALL` | `index` | 99,516 | **20** | ❌ 제거 |
+| 브랜드 + 좋아요순 | `ALL` | `ref` | 99,516 | **9,116** | ❌ 제거 |
+
 ### 체크리스트
 
-- [ ] `ProductModel`에 `@Table(indexes = ...)` 추가
-- [ ] 앱 재시작 후 데이터 재생성 확인
-- [ ] TO-BE EXPLAIN 분석 → AS-IS 비교
+- [x] `ProductModel`에 `@Table(indexes = ...)` 추가
+- [x] OR 조건 제거 → `findAllActive` / `findAllActiveByBrandId` 쿼리 분리
+- [x] 앱 재시작 후 데이터 재생성 확인 (brands 20 / products 10만 / stocks 10만)
+- [x] TO-BE EXPLAIN 분석 → AS-IS 비교 완료
 - [ ] 블로그용 AS-IS / TO-BE 비교 기록
 
 ---
@@ -165,6 +246,7 @@ productRepository.decrementLikeCount(productId);  // like_count -1 (원자 UPDAT
 ```
 ✅ 테스트 데이터 생성 (brands 20 / products 10만 / stocks 10만)
 ✅ AS-IS EXPLAIN 분석 확인 (풀스캔 + filesort)
-⬜ 인덱스 추가 → TO-BE EXPLAIN 비교
+✅ 인덱스 추가 → TO-BE EXPLAIN 비교 완료 (rows: 99,516 → 20 / filesort 제거)
+✅ OR 조건 제거 → 쿼리 분리 (findAllActive / findAllActiveByBrandId)
 ⬜ Redis 캐시 적용
 ```

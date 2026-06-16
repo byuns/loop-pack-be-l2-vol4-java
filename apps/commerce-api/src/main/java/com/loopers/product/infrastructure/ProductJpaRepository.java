@@ -13,8 +13,11 @@ import java.util.Optional;
 public interface ProductJpaRepository extends JpaRepository<ProductModel, Long> {
     Optional<ProductModel> findByIdAndDeletedAtIsNull(Long id);
 
-    @Query("SELECT p FROM ProductModel p WHERE p.deletedAt IS NULL AND (:brandId IS NULL OR p.brandId = :brandId)")
-    List<ProductModel> findAllWithFilter(@Param("brandId") Long brandId, Pageable pageable);
+    @Query("SELECT p FROM ProductModel p WHERE p.deletedAt IS NULL")
+    List<ProductModel> findAllActive(Pageable pageable);
+
+    @Query("SELECT p FROM ProductModel p WHERE p.deletedAt IS NULL AND p.brandId = :brandId")
+    List<ProductModel> findAllActiveByBrandId(@Param("brandId") Long brandId, Pageable pageable);
 
     @Query("SELECT p FROM ProductModel p WHERE p.id IN :ids AND p.deletedAt IS NULL")
     List<ProductModel> findAllByIds(@Param("ids") List<Long> ids);

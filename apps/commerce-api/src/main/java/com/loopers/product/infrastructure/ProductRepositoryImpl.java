@@ -35,7 +35,11 @@ public class ProductRepositoryImpl implements ProductRepository {
                 .and(Sort.by(Sort.Direction.DESC, "createdAt"));
             default -> Sort.by(Sort.Direction.DESC, "createdAt");
         };
-        return productJpaRepository.findAllWithFilter(brandId, PageRequest.of(page, size, springSort));
+        PageRequest pageRequest = PageRequest.of(page, size, springSort);
+        if (brandId == null) {
+            return productJpaRepository.findAllActive(pageRequest);
+        }
+        return productJpaRepository.findAllActiveByBrandId(brandId, pageRequest);
     }
 
     @Override
