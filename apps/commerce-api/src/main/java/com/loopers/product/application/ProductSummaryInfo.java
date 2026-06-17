@@ -1,18 +1,18 @@
 package com.loopers.product.application;
 
-import com.loopers.product.domain.ProductModel;
+import com.loopers.product.domain.ProductSummaryModel;
 
 public record ProductSummaryInfo(Long id, String name, Long price, Integer stock, Long brandId, String brandName, Long likeCount) {
 
-    public static ProductSummaryInfo from(ProductModel model, String brandName, Integer availableStock) {
+    public static ProductSummaryInfo from(ProductSummaryModel model, String brandName, Integer availableStock) {
         return new ProductSummaryInfo(
-            model.getId(),
-            model.getName(),
-            model.getPrice(),
+            model.id(),
+            model.name(),
+            model.price(),
             availableStock,
-            model.getBrandId(),
+            model.brandId(),
             brandName,
-            model.getLikeCount()
+            model.likeCount()
         );
     }
 }

@@ -1,6 +1,6 @@
 package com.loopers.product.application;
 
-import com.loopers.product.domain.ProductModel;
+import com.loopers.product.domain.ProductSummaryModel;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -14,11 +14,11 @@ class ProductSummaryInfoTest {
     @Nested
     class From {
 
-        @DisplayName("ProductModel, brandName, stock으로 생성하면 description 없이 필드가 정상 매핑된다.")
+        @DisplayName("ProductSummaryModel, brandName, stock으로 생성하면 description 없이 필드가 정상 매핑된다.")
         @Test
-        void mapsFields_withoutDescription_whenCreatedFromProductModel() {
+        void mapsFields_withoutDescription_whenCreatedFromProductSummaryModel() {
             // arrange
-            ProductModel model = new ProductModel("에어맥스", "나이키 운동화 상세 설명", 150000L, 1L);
+            ProductSummaryModel model = new ProductSummaryModel(1L, "에어맥스", 150000L, 1L, 0L);
 
             // act
             ProductSummaryInfo result = ProductSummaryInfo.from(model, "나이키", 50);

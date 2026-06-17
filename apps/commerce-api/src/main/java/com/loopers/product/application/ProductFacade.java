@@ -6,6 +6,7 @@ import com.loopers.brand.domain.BrandService;
 import com.loopers.product.domain.ProductModel;
 import com.loopers.product.domain.ProductRepository;
 import com.loopers.product.domain.ProductService;
+import com.loopers.product.domain.ProductSummaryModel;
 import com.loopers.product.domain.SortCondition;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
@@ -59,17 +60,17 @@ public class ProductFacade {
     @Cacheable(cacheNames = "products", key = "#sort.name() + ':' + #brandId + ':' + #inStock + ':' + #page + ':' + #size")
     @Transactional(readOnly = true)
     public List<ProductSummaryInfo> getProducts(SortCondition sort, Long brandId, boolean inStock, int page, int size) {
-        List<ProductModel> products = productRepository.findAll(sort, brandId, inStock, page, size);
+        List<ProductSummaryModel> products = productRepository.findAll(sort, brandId, inStock, page, size);
 
         List<Long> productIds = products.stream()
-            .map(ProductModel::getId)
+            .map(ProductSummaryModel::id)
             .toList();
 
         Map<Long, Integer> stockMap = stockRepository.findAllByProductIds(productIds).stream()
             .collect(Collectors.toMap(StockModel::getProductId, StockModel::availableStock));
 
         List<Long> brandIds = products.stream()
-            .map(ProductModel::getBrandId)
+            .map(ProductSummaryModel::brandId)
             .filter(Objects::nonNull)
             .distinct()
             .toList();
@@ -81,8 +82,8 @@ public class ProductFacade {
         return products.stream()
             .map(p -> ProductSummaryInfo.from(
                 p,
-                productService.resolveBrandName(Optional.ofNullable(brandMap.get(p.getBrandId()))),
-                stockMap.getOrDefault(p.getId(), 0)
+                productService.resolveBrandName(Optional.ofNullable(brandMap.get(p.brandId()))),
+                stockMap.getOrDefault(p.id(), 0)
             ))
             .toList();
     }

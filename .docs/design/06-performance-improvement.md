@@ -14,6 +14,7 @@
 | ① | 상품 목록 조회 — 브랜드 필터 + 좋아요순 정렬 인덱스 최적화 | ✅ 완료 |
 | ② | 좋아요 수 정렬 구조 개선 — 비정규화(`like_count`) 또는 Materialized View | ✅ 완료 |
 | ③ | 상품 목록·상세 API Redis 캐시 적용 | ✅ 완료 |
+| ④ | 목록 조회 DTO 분리 및 JPQL Projection 적용 | ✅ 완료 |
 
 ### Nice-To-Have
 
@@ -290,16 +291,7 @@ GET /api/v1/products?sortBy=likes_desc&inStock=true
 ```
 `inStock` 쿼리 파라미터 추가 (기본값 `false` → 기존 동작 유지).
 
-**쿼리 분기 구조 (`ProductRepositoryImpl.findAll`):**
-
-| brandId | inStock | 실행 쿼리 |
-|---------|---------|---------|
-| null | false | `findAllActive` |
-| 있음 | false | `findAllActiveByBrandId` |
-| null | true | `findAllActiveInStock` (EXISTS) |
-| 있음 | true | `findAllActiveByBrandIdInStock` (EXISTS + brandId) |
-
-총 4개 쿼리 메서드로 분기. 각 쿼리가 독립적으로 최적 인덱스를 활용한다.
+쿼리 분기 구조는 상단 [실행 쿼리 구조] 표 참고. 총 4개 쿼리 메서드로 분기하며, 각 쿼리가 독립적으로 최적 인덱스를 활용한다.
 
 ### 데이터 분포와 옵티마이저 선택
 
@@ -469,7 +461,7 @@ TTL이 최대 10분이므로 최대 10분간 stale 상태가 유지된다.
 public ProductInfo getProduct(Long productId) { ... }
 
 @Cacheable(cacheNames = "products", key = "#sort.name() + ':' + #brandId + ':' + #inStock + ':' + #page + ':' + #size")
-public List<ProductInfo> getProducts(...) { ... }
+public List<ProductSummaryInfo> getProducts(...) { ... }
 
 @Caching(evict = {
     @CacheEvict(cacheNames = "product", key = "#productId"),
@@ -507,6 +499,62 @@ public void cancelLike(Long userId, Long productId) { ... }
 - [x] `ProductFacade.updateProduct()` / `deleteProduct()` — `@CacheEvict` 적용
 - [x] `LikeFacade.addLike()` / `cancelLike()` — `@CacheEvict` 적용
 - [x] `RedisCacheErrorHandler` — Redis 장애 시 예외 삼키고 DB fallback, warn 로그 기록
+
+---
+
+## ④ 목록 조회 DTO 분리 및 JPQL Projection 적용
+
+### 배경
+
+상품 목록 API(`GET /api/v1/products`) 응답에는 `description`이 포함되지 않는다.
+그러나 기존 JPQL은 `SELECT p FROM ProductModel p`로 전체 엔티티를 조회해, 사용하지 않는 `description`까지 DB에서 읽어왔다.
+
+DTO를 분리했으니 쿼리도 그에 맞게 맞추는 게 자연스럽다.
+
+### 변경 내용
+
+**타입 계층 분리:**
+
+| 타입 | 용도 | description 포함 |
+|------|------|:---:|
+| `ProductInfo` | 상세 조회 전용 | ✅ |
+| `ProductSummaryInfo` | 목록 조회 전용 | ❌ |
+| `ProductSummaryModel` | JPQL projection용 record | ❌ |
+
+`ProductSummaryModel`은 JPQL `SELECT NEW` 생성자 표현식에 사용되는 순수 데이터 컨테이너다.
+`id, name, price, brandId, likeCount` 5개 컬럼만 가진다.
+
+**JPQL 변경:**
+
+```sql
+-- 변경 전
+SELECT p FROM ProductModel p WHERE p.deletedAt IS NULL
+
+-- 변경 후
+SELECT NEW com.loopers.product.domain.ProductSummaryModel(
+    p.id, p.name, p.price, p.brandId, p.likeCount
+) FROM ProductModel p WHERE p.deletedAt IS NULL
+```
+
+`ProductJpaRepository`의 4개 목록 쿼리(`findAllActive`, `findAllActiveByBrandId`, `findAllActiveInStock`, `findAllActiveByBrandIdInStock`) 모두 동일하게 적용.
+
+### 커버링 인덱스 검토
+
+Projection 적용 후 자연스럽게 떠오르는 다음 질문: "인덱스도 SELECT 컬럼에 맞게 바꾸면 row lookup 자체를 없앨 수 있지 않나?"
+
+SELECT 컬럼별 인덱스 포함 여부:
+
+| 컬럼 | 인덱스 포함 여부 |
+|------|:---:|
+| `id` | ✅ (PK, 보조 인덱스에 묵시적 포함) |
+| `price` | ✅ |
+| `brand_id` | ✅ |
+| `like_count` | ✅ |
+| **`name`** | ❌ |
+
+`name`이 인덱스에 없어 row lookup이 반드시 발생한다. `name`을 6개 인덱스에 추가하면 varchar 컬럼으로 인해 인덱스 크기가 크게 늘고 쓰기 비용이 증가한다. 이득보다 비용이 크다.
+
+**결론:** 인덱스는 변경하지 않는다. Projection 변경만으로도 row lookup 1회당 읽는 바이트가 줄어든다 (`description`이 크면 클수록 효과가 크다). 커버링 인덱스 적용은 현재 컬럼 구조상 현실적이지 않다.
 
 ---
 
@@ -550,15 +598,3 @@ public void cancelLike(Long userId, Long productId) { ... }
 - 앱 시작 시 자동 실행, 데이터 있으면 skip
 - 생성 소요 시간: 약 8~9초 (브랜드 + 상품 + 재고 합산)
 
----
-
-## 현재 진행 상황
-
-```
-✅ 테스트 데이터 생성 (brands 20 / products 10만 / stocks 10만)
-✅ AS-IS EXPLAIN 분석 확인 (풀스캔 + filesort)
-✅ OR 조건 제거 → 쿼리 분리 (findAllActive / findAllActiveByBrandId)
-✅ 최신순·가격순 인덱스 추가 → EXPLAIN 비교 완료 (rows: 99,449 → 20 / filesort 제거)
-✅ like_count 인덱스 유지 결정 → 서비스 크리티컬도 낮음 + Redis 캐시 조합으로 쓰기 비용 허용
-✅ Redis 캐시 적용
-```
