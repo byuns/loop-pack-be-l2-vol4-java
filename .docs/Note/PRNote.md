@@ -20,13 +20,13 @@
 
 ---
 
-**[결정 2] 좋아요 수 정렬 구조 — 비정규화 vs Materialized View**
+**[결정 2] 좋아요 수 정렬 구조 — 반정규화 vs Materialized View**
 
 - 고려한 대안:
-  - A (비정규화): `products.like_count` 컬럼에 좋아요 수를 미리 집계해두고 등록/취소 시 원자 UPDATE로 동기화
+  - A (반정규화): `products.like_count` 컬럼에 좋아요 수를 미리 집계해두고 등록/취소 시 원자 UPDATE로 동기화
   - B (Materialized View): 별도 snapshot 테이블을 만들고 스케줄러로 주기적 재계산
 - 최종 결정: **A**
-- 트레이드오프: B는 좋아요가 등록/취소될 때마다 갱신되지 않아 배치 주기만큼 stale이 발생한다. 좋아요 수는 "대략적인 인기순"이 목적이므로 순간적인 불일치는 허용되지만, 비정규화는 원자 UPDATE(`like_count = like_count ± 1`)로 훨씬 가까운 시점에 동기화된다. 운영 복잡도(스케줄러 관리)도 낮다.
+- 트레이드오프: B는 좋아요가 등록/취소될 때마다 갱신되지 않아 배치 주기만큼 stale이 발생한다. 좋아요 수는 "대략적인 인기순"이 목적이므로 순간적인 불일치는 허용되지만, 반정규화는 원자 UPDATE(`like_count = like_count ± 1`)로 훨씬 가까운 시점에 동기화된다. 운영 복잡도(스케줄러 관리)도 낮다.
 
 ---
 
@@ -40,11 +40,11 @@
 
 ---
 
-**[결정 4] inStock 필터 구현 방식 — EXISTS vs JOIN vs 비정규화**
+**[결정 4] inStock 필터 구현 방식 — EXISTS vs JOIN vs 반정규화**
 
 - 고려한 대안:
   - A (JOIN): `products JOIN stocks ON ...` 추가
-  - B (비정규화): `products.available_stock` 컬럼 추가
+  - B (반정규화): `products.available_stock` 컬럼 추가
   - C (EXISTS 서브쿼리): `WHERE EXISTS (SELECT 1 FROM stocks WHERE product_id = p.id AND total_stock - reserved_stock > 0)`
 - 최종 결정: **C**
 - 트레이드오프: A는 옵티마이저가 stocks를 드라이빙 테이블로 선택하면 products의 정렬 인덱스가 무력화되고 filesort가 재발한다. B는 재고는 정합성이 중요한 데이터라 쓰기마다 동기화 부담이 크다(재고 부족/선점 상황에서 불일치 발생 시 잘못된 필터 결과를 낸다). C는 products 인덱스를 드라이빙으로 유지하면서 재고 조건을 정확하게 표현한다. Redis 캐시와 조합해 EXISTS 실행 빈도를 줄인다.

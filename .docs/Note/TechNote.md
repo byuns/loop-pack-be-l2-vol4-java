@@ -249,7 +249,3 @@ OFFSET 페이지네이션의 딥 페이지 문제는 인덱스로 해결할 수 
 
 ---
 
-## Reference
-
-- [MySQL EXPLAIN Output Format](https://dev.mysql.com/doc/refman/8.0/en/explain-output.html)
-- [MySQL InnoDB Index Types](https://dev.mysql.com/doc/refman/8.0/en/innodb-index-types.html)
