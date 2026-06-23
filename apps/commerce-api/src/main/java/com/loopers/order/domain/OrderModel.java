@@ -53,8 +53,9 @@ public class OrderModel extends BaseEntity {
         this.finalAmount = this.originalAmount - discountAmount;
     }
 
+    // [fix] PAYMENT_FAILED 주문은 재결제할 방법이 없어 영구 고착되던 문제 수정 — 실패 사유와 무관하게 재결제 허용
     public void startPayment() {
-        if (this.status != OrderStatus.PENDING_PAYMENT) {
+        if (this.status != OrderStatus.PENDING_PAYMENT && this.status != OrderStatus.PAYMENT_FAILED) {
             throw new CoreException(ErrorType.BAD_REQUEST, "결제를 시작할 수 없는 주문 상태입니다.");
         }
         this.status = OrderStatus.IN_PAYMENT;

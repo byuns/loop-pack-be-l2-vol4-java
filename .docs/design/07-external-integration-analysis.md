@@ -351,10 +351,26 @@ PG는 재시도 시 동일한 결제건을 중복 생성할 수 있다.
 
 ## 미결 사항
 
-### 미결 1. PAYMENT_FAILED 주문에서 재결제 가능 여부
-- `OrderModel.startPayment()`가 현재 `PENDING_PAYMENT`에서만 허용
-- `PAYMENT_FAILED → IN_PAYMENT` 전이를 열어줄지 결정 필요
-- 카드 변경 후 재결제 시나리오가 요구사항에 포함되는지 확인 후 결정
+### 미결 1. PAYMENT_FAILED 주문에서 재결제 가능 여부 — 해결됨
+
+**결정: 실패 사유를 구분하지 않고 `PAYMENT_FAILED → IN_PAYMENT` 재결제를 허용한다.**
+
+```java
+// OrderModel.startPayment()
+if (this.status != OrderStatus.PENDING_PAYMENT && this.status != OrderStatus.PAYMENT_FAILED) {
+    throw new CoreException(ErrorType.BAD_REQUEST, "결제를 시작할 수 없는 주문 상태입니다.");
+}
+```
+
+**왜 실패 사유별로 분기하지 않는가**
+
+카드 결제망에는 실제로 hard decline(한도초과·잘못된 카드 — 같은 카드로 재시도해도 동일하게 거절)과 soft decline(카드사 시스템 점검 등 일시적 인프라 장애 — 시간을 두고 재시도하면 성공 가능)의 구분이 존재하고, 실무 PG/PSP는 이 구분에 따라 자동 재시도(soft decline retry) 여부를 다르게 처리하는 경우가 많다.
+
+그러나 이 구분은 PG가 거절 사유를 구조화된 코드로 내려줄 때만 시스템이 활용할 수 있다. pg-simulator는 `FAILED`의 사유로 "한도초과입니다"/"잘못된 카드입니다" 두 가지만 반환하며, 둘 다 hard decline이고 soft decline에 해당하는 사유 자체가 없다. 시뮬레이터가 절대 만들어내지 않는 케이스를 분기하는 코드는 검증할 방법이 없으므로 작성하지 않는다.
+
+대신 시스템이 실패 사유를 판단하지 않고, **사용자가 재결제 시점에 같은 카드를 쓸지 다른 카드를 쓸지 직접 선택**하도록 한다. hard decline이면 사용자가 카드를 바꿔서, soft decline이면 같은 카드로 재시도하면 된다 — 시스템은 PAYMENT_FAILED를 "재결제 가능" 상태로 열어주는 것까지만 책임진다.
+
+> 참고: 만약 실제 PG가 soft decline을 구분 가능한 코드로 제공한다면, 해당 케이스만 스케줄러 기반 자동 재시도(백오프 포함)로 처리하는 것이 적절한 다음 단계가 된다. 현재는 범위 밖.
 
 ### 미결 2. PG 호출 실패 시 Order 상태 처리
 - `startPayment()`로 IN_PAYMENT 커밋 후 PG 호출 실패 시 Order 처리 방법

@@ -130,6 +130,28 @@ class PaymentFacadeIntegrationTest {
             OrderModel updatedOrder = orderJpaRepository.findById(order.getId()).orElseThrow();
             assertThat(updatedOrder.getStatus()).isEqualTo(OrderStatus.PENDING_PAYMENT);
         }
+
+        @DisplayName("PAYMENT_FAILED 주문이면, 재결제가 정상적으로 진행된다.")
+        @Test
+        void savesPaymentAndChangesOrderToInPayment_whenOrderIsPaymentFailed() {
+            // arrange
+            OrderModel order = savedOrder(1L);
+            order.startPayment();
+            order.failPayment();
+            orderJpaRepository.save(order);
+            when(pgPaymentClient.requestPayment(anyString(), any()))
+                .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001235", "PENDING", null));
+
+            // act
+            PaymentInfo result = paymentFacade.requestPayment(1L, "user1", order.getId(), "SAMSUNG", "1234-5678-9012-3456");
+
+            // assert
+            OrderModel updatedOrder = orderJpaRepository.findById(order.getId()).orElseThrow();
+            assertAll(
+                () -> assertThat(result.transactionKey()).isEqualTo("TX-001235"),
+                () -> assertThat(updatedOrder.getStatus()).isEqualTo(OrderStatus.IN_PAYMENT)
+            );
+        }
     }
 
     @DisplayName("콜백을 처리할 때,")
