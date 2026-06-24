@@ -226,56 +226,52 @@ PG는 같은 결과를 두 번 보낼 수 있다 (재시도 없는 단발성 호
 
 ## 구현 후 분석 — 실패 케이스 5가지 (A~E)
 
-구현 전에는 "PG 호출이 실패하면 Order를 어떤 상태로 보낼지"가 정해지지 않았었다. 구현해보니 답은 단순했다 — **PG 호출이 실패하면 트랜잭션 전체가 롤백되면서 Order가 자동으로 PENDING_PAYMENT로 돌아간다.** 별도의 "실패 처리 로직"을 만들 필요가 없었다. 아래 케이스들이 이 동작을 보여준다.
+구현 전에는 "PG 호출이 실패하면 Order를 어떤 상태로 보낼지"가 정해지지 않았었다. 초기 구현(단일 `@Transactional`)에서는 PG 호출이 실패하면 트랜잭션 전체가 롤백되어 Order가 자동으로 PENDING_PAYMENT로 돌아갔다. 그러나 이후 k6 테스트 결과 커넥션 풀 포화가 확인되어 **트랜잭션 경계를 분리하는 방향(선택지 2)으로 전환**했다 (→ "개선 적용 및 재측정" 절). 분리 후에는 TX1이 PG 호출 전에 커밋되므로, PG 실패 시 롤백이 아니라 명시적 TX C(보정 트랜잭션)로 Order가 PAYMENT_FAILED로 전이된다. 아래 케이스들은 **현재 tx-split 구조 기준**으로 동작을 설명한다.
 
 #### 케이스 A — PG 즉시 에러 (40% 확률)
 
 ```
-@Transactional {
-    order.startPayment()         → IN_PAYMENT (커밋 예정)
-    pgPaymentClient.request()    → 100~500ms 후 INTERNAL_ERROR 응답
-}
-→ 예외 발생 → 트랜잭션 롤백 → Order: PENDING_PAYMENT 복원
+[TX1] order.startPayment() → IN_PAYMENT → 커밋 → 커넥션 반환
+[PG 호출] pgPaymentClient.request() → 100~500ms 후 INTERNAL_ERROR 응답 → 예외 발생
+[TX C] order.failPayment() → PAYMENT_FAILED → 커밋
 ```
 
-PG에 결제 건이 생성되지 않았으므로 추가 처리 없이 사용자가 재시도 가능. **별도 대응 불필요.**
+PG에 결제 건이 생성되지 않았으므로 내부/외부 상태 불일치 없음. `startPayment()`가 PAYMENT_FAILED에서도 재시도를 허용하므로 사용자는 재결제 가능.
 
 #### 케이스 B — PG 응답이 600ms를 넘게 걸림 (TimeLimiter 타임아웃)
 
-1. commerce-api가 PG에 결제를 요청한다.
-2. 600ms 안에 응답이 안 온다 → TimeLimiter가 타임아웃으로 끊는다.
-3. 트랜잭션이 롤백되어 Order는 PENDING_PAYMENT로 돌아간다.
+1. TX1이 커밋된다 (Order: IN_PAYMENT).
+2. PG 호출 시작. 600ms 안에 응답이 안 온다 → TimeLimiter가 타임아웃 예외를 던진다.
+3. TX1은 이미 커밋됐으므로 롤백 불가. catch 블록 → **TX C → Order: PAYMENT_FAILED**.
 4. **그런데 PG는 그 요청을 이미 받아서 처리하고 있을 수 있다.** commerce-api가 기다리길 포기한 것뿐이지, PG 입장에서는 정상 진행 중인 결제다.
-5. PG가 처리를 끝내고 콜백을 보내지만, commerce-api에는 이 거래의 `PaymentModel`이 없어서(저장되기 전에 롤백됨) 콜백이 "결제 정보 없음"으로 무시된다.
+5. PG가 처리를 끝내고 콜백을 보내지만, commerce-api에는 이 거래의 `PaymentModel`이 없어서(TX2가 실행되기 전에 예외가 발생했으므로) 콜백이 "결제 정보 없음"으로 무시된다.
 
-Order가 PENDING_PAYMENT이므로 사용자가 재결제할 수 있다. 다만 재결제하면 PG에는 같은 주문에 대한 거래가 2개 생기게 된다 — 실제 서비스라면 첫 번째 건에 환불 처리가 필요하지만 이 과제 범위 밖이다.
+Order가 PAYMENT_FAILED이므로 사용자가 재결제할 수 있다. 다만 재결제하면 PG에는 같은 주문에 대한 거래가 2개 생기게 된다 — 실제 서비스라면 첫 번째 건에 환불 처리가 필요하지만 이 과제 범위 밖이다.
 
 → 처음엔 "PaymentModel 자체가 없어 복구 API로 손댈 수 없다"고 범위 밖으로 미뤘다가, **결정 6에서 orderId 기반 조회로 실제로 해결했다.**
 
 #### 케이스 C — CircuitBreaker OPEN
 
 ```
-PG 실패율 50% 초과 → CircuitBreaker OPEN
-→ 이후 요청은 Fallback 즉시 발동, pgPaymentClient.request() 호출 자체가 일어나지 않음
-→ Fallback이 예외 던짐 → 롤백 → Order: PENDING_PAYMENT
+PG 실패율 60% 초과 → CircuitBreaker OPEN
+TX1 커밋 (Order: IN_PAYMENT)
+→ pgPaymentClient.request() → Fallback 즉시 발동 (PG 호출 자체가 일어나지 않음)
+→ Fallback이 예외 던짐 → catch 블록 → TX C → Order: PAYMENT_FAILED
 ```
 
-PG 호출이 아예 일어나지 않아 내부/외부 상태 불일치가 없는 가장 깔끔한 실패 케이스.
+PG 호출이 아예 일어나지 않아 PG 쪽에 고아 거래가 생길 일이 없는 가장 깔끔한 실패 케이스.
 
 **설정 버그로 한동안 동작 안 함 → 수정.** `spring.cloud.openfeign.circuitbreaker.enabled: true`가 local/test 프로파일에만 선언되어 있어 dev/qa/prd에서는 CB와 Fallback이 동작하지 않았다. 전역 `spring:` 블록으로 옮겨 모든 프로파일에 적용했다.
 
 #### 케이스 D — PG 요청 성공, 내부 저장 실패
 
 ```
-@Transactional {
-    order.startPayment()         → IN_PAYMENT
-    pgPaymentClient.request()    → 성공, transactionKey 반환
-    paymentRepository.save()     → DB 일시 장애 등으로 실패
-}
-→ 예외 발생 → 트랜잭션 롤백 → Order: PENDING_PAYMENT, PaymentModel 없음
+[TX1] order.startPayment() → IN_PAYMENT → 커밋
+[PG 호출] pgPaymentClient.request() → 성공, transactionKey 반환
+[TX2] paymentRepository.save() → DB 일시 장애 등으로 실패 → TX2 롤백
 ```
 
-발생 확률은 매우 낮지만(DB 일시 장애), 케이스 B와 결과가 동일하다 — **같은 방법(결정 6)으로 해결.**
+TX2 실패는 PG 호출 성공 이후이므로 catch 블록(TX C)이 실행되지 않는다. Order는 IN_PAYMENT에 머무르고 PaymentModel은 로컬에 없는 상태다. 케이스 B와 동일하게 **결정 6(orderId 기반 PG 재조회)으로 해결.** 복구 API 호출 시 PG에서 거래를 찾아 PaymentModel을 새로 동기화하고 Order 상태를 보정한다.
 
 #### 케이스 E — 동시 결제 요청 (Race Condition)
 
@@ -329,16 +325,16 @@ TX2: 락 획득 대기 → (TX1 커밋 후) Order 읽음 → status: IN_PAYMENT 
 
 락 보유 시간을 최소화하고 케이스 E를 구조적으로 해결하지만, PG 실패 시 Order가 IN_PAYMENT에 고착되므로 TX C가 필요하고, TX C 자체가 실패하면 Order가 영구 고착된다. 케이스 B/D(PG가 실제로 처리했는지 알 수 없는 경우)는 이 구조에서도 여전히 복구 API가 필요하다.
 
-### 최종 결정 — 선택지 1 (현재 구조 유지)
+### 초기 결정 — 선택지 1 유지 (k6 테스트 전)
 
 선택지 2는 케이스 E 하나를 구조적으로 해결하기 위해 트랜잭션 경계를 전부 재설계하지만, B/D는 어느 선택지에서도 복구 API 없이는 해결되지 않는다. 추가 복잡도 대비 실질적 이득이 없다고 판단했다.
 
 | 케이스 | 해결 방법 |
 |--------|-----------|
-| A. PG 즉시 에러 | 기존 롤백 구조로 자동 복원 |
-| B. TimeLimiter 초과 | 결정 6 (orderId 기반 PG 재조회) |
-| C. CircuitBreaker OPEN | application.yml 프로파일 버그 수정 |
-| D. 내부 저장 실패 | 결정 6 (B와 동일) |
+| A. PG 즉시 에러 | TX C → PAYMENT_FAILED, 사용자 재결제 가능 |
+| B. TimeLimiter 초과 | TX C → PAYMENT_FAILED + 결정 6 (orderId 기반 PG 재조회) |
+| C. CircuitBreaker OPEN | TX C → PAYMENT_FAILED + application.yml 프로파일 버그 수정 |
+| D. 내부 저장 실패 | Order 상태 IN_PAYMENT 유지 + 결정 6 (B와 동일) |
 | E. 동시 요청 | 비관적 락 |
 
 ### 그런데 이 선택, 정말 안전한가? — 재검토
@@ -360,7 +356,9 @@ TX2: 락 획득 대기 → (TX1 커밋 후) Order 읽음 → status: IN_PAYMENT 
 | 락 대기 | **같은 주문**에 대한 동시 요청만 차단 | 케이스 E를 막기 위한 의도된 동작 — 문제 아님 |
 | 커넥션 점유 | **모든** 결제 요청이 PG 응답까지 커넥션 1개씩 점유 | `maximum-pool-size: 40`(`modules/jpa/src/main/resources/jpa.yml:22`) 기준, 600ms 안에 **동시 40건 이상**이 겹쳐야 풀이 고갈됨 — 현재 트래픽 규모에서는 가능성이 낮음 |
 
-**결론.** 600ms 캡이 모든 프로파일에 실제로 적용되고, 동시 결제량이 풀 크기(40) 이하인 한 선택지 1의 위험은 감당 가능한 수준이다. 선택지 2는 점유 시간을 0으로 줄이지만 B/D의 복구 필요성은 그대로 남고 새로운 실패 케이스(TX C 실패 시 영구 고착)가 추가되므로, 추가 복잡도를 들일 이유가 없다고 보고 **선택지 1을 유지**했다.
+**초기 결론 (k6 테스트 전).** 600ms 캡이 모든 프로파일에 실제로 적용되고, 동시 결제량이 풀 크기(40) 이하인 한 선택지 1의 위험은 감당 가능한 수준이다. 선택지 2는 점유 시간을 0으로 줄이지만 B/D의 복구 필요성은 그대로 남고 새로운 실패 케이스(TX C 실패 시 영구 고착)가 추가되므로, 이 시점에서는 추가 복잡도를 들일 이유가 없다고 판단했다.
+
+**최종 결정 — 선택지 2로 전환 (k6 테스트 후).** 그러나 k6 부하 테스트(80 VU)에서 `pool_timeout_rate` 7.02%가 실측됐다. "동시 결제량이 풀 크기(40) 이하인 한"이라는 전제가 실제 부하에서는 성립하지 않음을 수치로 확인한 것이다. 커넥션 점유 문제가 이론이 아니라 현실적 규모에서도 발생하므로, 선택지 2의 추가 복잡도가 정당화된다고 판단하고 **선택지 2로 전환**했다 (→ "개선 적용 및 재측정" 절).
 
 ---
 
