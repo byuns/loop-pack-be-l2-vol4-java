@@ -25,6 +25,7 @@ public class PaymentV1Dto {
     }
 
     public record CallbackRequest(
-        String transactionKey
+        String transactionKey,
+        Long orderId
     ) {}
 }

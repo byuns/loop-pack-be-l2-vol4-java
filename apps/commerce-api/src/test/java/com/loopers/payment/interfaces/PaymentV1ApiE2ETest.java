@@ -170,7 +170,7 @@ class PaymentV1ApiE2ETest {
             when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "SUCCESS", "정상 승인되었습니다."));
 
-            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234");
+            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234", orderId);
 
             // act
             ResponseEntity<Void> response = testRestTemplate.exchange(
@@ -197,7 +197,7 @@ class PaymentV1ApiE2ETest {
             when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "FAILED", "한도초과입니다."));
 
-            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234");
+            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234", orderId);
 
             // act
             ResponseEntity<Void> response = testRestTemplate.exchange(
@@ -225,7 +225,7 @@ class PaymentV1ApiE2ETest {
             when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "FAILED", "한도초과입니다."));
 
-            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234");
+            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234", orderId);
 
             // act
             testRestTemplate.exchange(ENDPOINT + "/callback", HttpMethod.POST, new HttpEntity<>(callback), Void.class);
@@ -247,7 +247,7 @@ class PaymentV1ApiE2ETest {
             when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "SUCCESS", "정상 승인되었습니다."));
 
-            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234");
+            PaymentV1Dto.CallbackRequest callback = new PaymentV1Dto.CallbackRequest("TX-001234", orderId);
             testRestTemplate.exchange(ENDPOINT + "/callback", HttpMethod.POST, new HttpEntity<>(callback), Void.class);
 
             // act (두 번째 콜백)

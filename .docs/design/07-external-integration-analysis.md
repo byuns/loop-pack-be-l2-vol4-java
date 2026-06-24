@@ -244,11 +244,11 @@ PG에 결제 건이 생성되지 않았으므로 내부/외부 상태 불일치 
 2. PG 호출 시작. 600ms 안에 응답이 안 온다 → TimeLimiter가 타임아웃 예외를 던진다.
 3. TX1은 이미 커밋됐으므로 롤백 불가. catch 블록 → **TX C → Order: PAYMENT_FAILED**.
 4. **그런데 PG는 그 요청을 이미 받아서 처리하고 있을 수 있다.** commerce-api가 기다리길 포기한 것뿐이지, PG 입장에서는 정상 진행 중인 결제다.
-5. PG가 처리를 끝내고 콜백을 보내지만, commerce-api에는 이 거래의 `PaymentModel`이 없어서(TX2가 실행되기 전에 예외가 발생했으므로) 콜백이 "결제 정보 없음"으로 무시된다.
+5. PG가 처리를 끝내고 콜백을 보낸다. commerce-api에는 이 거래의 `PaymentModel`이 없어서(TX2가 실행되기 전에 예외가 발생했으므로) **기존 콜백 처리 코드는 "결제 정보 없음"으로 무시했다.** 이는 버그였다.
 
 Order가 PAYMENT_FAILED이므로 사용자가 재결제할 수 있다. 다만 재결제하면 PG에는 같은 주문에 대한 거래가 2개 생기게 된다 — 실제 서비스라면 첫 번째 건에 환불 처리가 필요하지만 이 과제 범위 밖이다.
 
-→ 처음엔 "PaymentModel 자체가 없어 복구 API로 손댈 수 없다"고 범위 밖으로 미뤘다가, **결정 6에서 orderId 기반 조회로 실제로 해결했다.**
+→ 복구 API 범위는 **결정 6에서 orderId 기반 조회로 확장**했다. 콜백 경로 자체의 버그는 **결정 9에서 수정**했다.
 
 #### 케이스 C — CircuitBreaker OPEN
 
@@ -364,10 +364,10 @@ TX2: 락 획득 대기 → (TX1 커밋 후) Order 읽음 → status: IN_PAYMENT 
 
 ## 구현 후 결정 사항
 
-### 결정 4. 비관적 락 적용 범위
+### 결정 4. 비관적 락 적용 범위 (초기)
 - 결제 요청(`requestPayment`)에서만 `SELECT FOR UPDATE`를 사용한다.
-- 콜백 처리(`handleCallback`), 복구(`recoverPayment`) 등 다른 조회에는 일반 `find()`를 유지한다.
 - 이유: 결제 요청만이 동시 접근으로 인한 중복 PG 호출을 유발할 수 있는 경로이기 때문이다.
+- 이후 복구 API(`recoverPayment`)에서도 동시 복구 요청 시 PaymentModel 중복 생성 문제가 발견되어 비관적 락이 추가됐다 (→ 결정 10).
 
 ### 결정 5. 복구 API — POST /api/v1/payments/{orderId}/recover
 - 콜백 미수신으로 IN_PAYMENT에 고착된 결제 건을 수동으로 복구한다.
@@ -469,6 +469,55 @@ connection-timeout: 3000  # 커넥션 풀에서 대기하는 최대 시간
 | Feign readTimeout | 3,000ms | TimeLimiter 인터럽트 후 소켓 좀비 |
 | Redis commandTimeout | 500ms | Redis 장애 시 요청 스레드 무기한 점유 |
 | HikariCP connection-timeout | 3,000ms | 커넥션 풀 고갈 시 요청 무기한 대기 |
+
+### 결정 9. 타임아웃 케이스 콜백 버그 수정 — `handleCallback`에 orderId 추가
+
+타임아웃으로 PaymentModel이 로컬에 없는 상태에서 PG 콜백이 도착하면 `findByTransactionKey`가 빈 Optional을 반환하고, 기존 코드는 여기서 NOT_FOUND 예외를 던져 콜백을 조용히 버렸다. PG에서는 결제가 성공했지만 Order는 PAYMENT_FAILED로 남는 버그다.
+
+```
+[수정 전]
+handleCallback(transactionKey)
+  → paymentRepository.findByTransactionKey(transactionKey)
+  → 없으면 throw NOT_FOUND ← 콜백 버려짐
+
+[수정 후]
+handleCallback(transactionKey, orderId)
+  → paymentRepository.findByTransactionKey(transactionKey)
+  → 없으면 → orderRepository.find(orderId) → Order 조회
+           → pgClient.getTransaction(order.loginId, transactionKey)
+           → PaymentModel 신규 생성 + 상태 보정
+```
+
+수정 내용:
+
+1. `CallbackRequest`에 `orderId` 필드 추가. pg-simulator는 원래부터 콜백 바디에 `orderId`를 포함해 전송하고 있었다 — 역직렬화 대상에서 빠져 있었을 뿐이다.
+2. `handleCallback(transactionKey, orderId)` — PaymentModel이 없을 때 orderId로 Order를 찾아 `recoverFromPgByTransactionKey` 호출.
+3. `recoverFromPgByTransactionKey`: 이미 알고 있는 `transactionKey`로 PG에 바로 재조회 후 PaymentModel 신규 생성 + 상태 보정. `recoverFromPgByOrderId`(결정 6)와 달리 orderId 기반 목록 조회를 거치지 않아 PG 호출 1회로 줄어든다.
+4. **OrderModel에 `loginId` 추가**: PG 재조회(`pgClient.getTransaction`)에는 `X-USER-ID` 헤더(loginId)가 필요하다. 콜백 경로는 인증 없는 엔드포인트이고 PaymentModel도 없으므로, loginId를 얻을 수 있는 유일한 경로가 OrderModel이다. PaymentModel이 이미 `loginId`를 저장하는 이유와 동일하다 — PG 호출 시 사용자 식별이 필요하기 때문이다.
+
+**orderId 위조 가능성.** orderId를 콜백 바디에서 읽는 것은 신뢰하지 않는 외부 입력을 사용하는 것처럼 보이지만, orderId는 경로 탐색에만 사용하고 실제 상태 반영은 `pgClient.getTransaction(transactionKey)`로 PG에서 직접 가져온 값만 사용한다. orderId를 위조해 콜백을 보내도 얻을 수 있는 것은 "없는 Order에 대한 NOT_FOUND 유도"뿐이어서 실질적 보안 위협이 없다.
+
+### 결정 10. `recoverPayment` 비관적 락 — 동시 복구 요청 시 PaymentModel 중복 생성 방지
+
+복구 API와 콜백이 동시에 들어오면(또는 스케줄러와 수동 호출이 겹치면) 두 요청이 모두 `existingPayment.isEmpty()`를 true로 읽고 PaymentModel을 중복 생성할 수 있다.
+
+```
+[수정 전]
+요청 A: orderRepository.find(orderId) → IN_PAYMENT 확인 (일반 SELECT)
+요청 B: orderRepository.find(orderId) → IN_PAYMENT 확인 (동시, 락 없음)
+요청 A: existingPayment.isEmpty() → true → PaymentModel 생성
+요청 B: existingPayment.isEmpty() → true → PaymentModel 또 생성 (중복!)
+
+[수정 후]
+요청 A: orderRepository.findWithLock(orderId) → SELECT FOR UPDATE, 락 획득
+요청 B: orderRepository.findWithLock(orderId) → 락 획득 대기
+요청 A: existingPayment.isEmpty() → true → PaymentModel 생성 후 커밋 → 락 해제
+요청 B: 락 획득 → existingPayment.isEmpty() → false (이미 생성됨) → 종료
+```
+
+**핵심: 락 선점 위치가 isEmpty 체크보다 반드시 앞이어야 한다.** 락을 isEmpty 체크 이후에 잡으면 두 요청이 모두 isEmpty()=true를 확인한 다음 락을 잡으므로 여전히 중복이 발생한다. 락을 먼저 잡아야 첫 번째 요청의 커밋 결과(PaymentModel 생성)를 두 번째 요청이 볼 수 있다.
+
+복구 API와 타임아웃 직후 콜백이 겹치는 구간은 PG 처리 완료 후 몇 초 이내로 매우 좁지만, 그 구간에서 중복이 발생하면 동일한 transactionKey를 가진 PaymentModel이 두 개 생겨 정합성이 영구히 깨진다.
 
 ---
 

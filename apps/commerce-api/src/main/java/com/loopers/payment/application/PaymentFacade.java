@@ -83,7 +83,8 @@ public class PaymentFacade {
 
     @Transactional
     public void recoverPayment(Long orderId, Long userId, String loginId) {
-        OrderModel order = orderRepository.find(orderId)
+        // [fix] 동시 복구 요청 시 PaymentModel 중복 생성 방지 — isEmpty 체크 전에 락 선점
+        OrderModel order = orderRepository.findWithLock(orderId)
             .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
 
         if (!order.getUserId().equals(userId)) {
@@ -128,10 +129,18 @@ public class PaymentFacade {
     }
 
     @Transactional
-    public void handleCallback(String transactionKey) {
-        PaymentModel payment = paymentRepository.findByTransactionKey(transactionKey)
-            .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "결제 정보를 찾을 수 없습니다."));
+    public void handleCallback(String transactionKey, Long orderId) {
+        Optional<PaymentModel> existingPayment = paymentRepository.findByTransactionKey(transactionKey);
 
+        if (existingPayment.isEmpty()) {
+            // [fix] 타임아웃으로 PaymentModel이 없는 경우 콜백이 도착해도 NOT_FOUND로 버려지던 버그 수정
+            OrderModel order = orderRepository.find(orderId)
+                .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
+            recoverFromPgByTransactionKey(order, transactionKey);
+            return;
+        }
+
+        PaymentModel payment = existingPayment.get();
         if (payment.getStatus() != PaymentStatus.PENDING) {
             return;
         }
@@ -141,6 +150,22 @@ public class PaymentFacade {
 
         // [fix] 콜백 발신지를 검증할 방법이 없어, 바디의 status를 그대로 믿는 대신 PG에 재조회한 실제 상태를 사용
         PgPaymentClientDto.TransactionResponse pgResponse = pgPaymentClient.getTransaction(payment.getLoginId(), transactionKey);
+        applyPgResult(payment, order, pgResponse.status());
+    }
+
+    private void recoverFromPgByTransactionKey(OrderModel order, String transactionKey) {
+        PgPaymentClientDto.TransactionResponse pgResponse;
+        try {
+            pgResponse = pgPaymentClient.getTransaction(order.getLoginId(), transactionKey);
+        } catch (CoreException e) {
+            if (e.getErrorType() == ErrorType.NOT_FOUND) {
+                return;
+            }
+            throw e;
+        }
+
+        PaymentModel payment = new PaymentModel(order.getId(), transactionKey, "UNKNOWN", order.getFinalAmount(), order.getLoginId());
+        payment = paymentRepository.save(payment);
         applyPgResult(payment, order, pgResponse.status());
     }
 

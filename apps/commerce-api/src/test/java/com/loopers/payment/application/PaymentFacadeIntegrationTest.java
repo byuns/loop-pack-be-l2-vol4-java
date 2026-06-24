@@ -55,7 +55,7 @@ class PaymentFacadeIntegrationTest {
 
     private OrderModel savedOrder(Long userId) {
         return orderJpaRepository.save(
-            new OrderModel(userId, List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)))
+            new OrderModel(userId, "user1", List.of(new OrderItemModel(1L, "에어맥스", 150000L, 1)), null, 0L)
         );
     }
 
@@ -170,7 +170,7 @@ class PaymentFacadeIntegrationTest {
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "SUCCESS", "정상 승인되었습니다."));
 
             // act
-            paymentFacade.handleCallback("TX-001234");
+            paymentFacade.handleCallback("TX-001234", order.getId());
 
             // assert
             PaymentModel payment = paymentJpaRepository.findByTransactionKey("TX-001234").orElseThrow();
@@ -193,7 +193,7 @@ class PaymentFacadeIntegrationTest {
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "FAILED", "한도초과입니다."));
 
             // act
-            paymentFacade.handleCallback("TX-001234");
+            paymentFacade.handleCallback("TX-001234", order.getId());
 
             // assert
             PaymentModel payment = paymentJpaRepository.findByTransactionKey("TX-001234").orElseThrow();
@@ -216,7 +216,7 @@ class PaymentFacadeIntegrationTest {
                 .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "PENDING", null));
 
             // act
-            paymentFacade.handleCallback("TX-001234");
+            paymentFacade.handleCallback("TX-001234", order.getId());
 
             // assert
             PaymentModel payment = paymentJpaRepository.findByTransactionKey("TX-001234").orElseThrow();
@@ -239,23 +239,62 @@ class PaymentFacadeIntegrationTest {
             paymentJpaRepository.save(payment);
 
             // act (예외 없이 실행)
-            paymentFacade.handleCallback("TX-001234");
+            paymentFacade.handleCallback("TX-001234", order.getId());
 
             // assert
             PaymentModel savedPayment = paymentJpaRepository.findByTransactionKey("TX-001234").orElseThrow();
             assertThat(savedPayment.getStatus()).isEqualTo(PaymentStatus.SUCCESS);
         }
 
-        @DisplayName("존재하지 않는 transactionKey로 콜백이 오면, NOT_FOUND 예외가 발생한다.")
+        @DisplayName("orderId의 주문이 없으면, NOT_FOUND 예외가 발생한다.")
         @Test
-        void throwsNotFound_whenTransactionKeyNotExists() {
+        void throwsNotFound_whenOrderNotExists() {
             // act
             CoreException result = assertThrows(CoreException.class, () ->
-                paymentFacade.handleCallback("UNKNOWN-KEY")
+                paymentFacade.handleCallback("UNKNOWN-KEY", 999L)
             );
 
             // assert
             assertThat(result.getErrorType()).isEqualTo(ErrorType.NOT_FOUND);
+        }
+
+        @DisplayName("로컬에 PaymentModel이 없고 PG가 SUCCESS 반환하면, PaymentModel이 새로 생성되고 Order가 CONFIRMED로 변경된다.")
+        @Test
+        void createsPaymentAndConfirmsOrder_whenNoLocalPaymentButPgReturnsSuccess() {
+            // arrange
+            OrderModel order = savedOrder(1L);
+            order.startPayment();
+            orderJpaRepository.save(order);
+            when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
+                .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "SUCCESS", "정상 승인되었습니다."));
+
+            // act
+            paymentFacade.handleCallback("TX-001234", order.getId());
+
+            // assert
+            PaymentModel payment = paymentJpaRepository.findByTransactionKey("TX-001234").orElseThrow();
+            OrderModel updatedOrder = orderJpaRepository.findById(order.getId()).orElseThrow();
+            assertAll(
+                () -> assertThat(payment.getStatus()).isEqualTo(PaymentStatus.SUCCESS),
+                () -> assertThat(updatedOrder.getStatus()).isEqualTo(OrderStatus.CONFIRMED)
+            );
+        }
+
+        @DisplayName("로컬에 PaymentModel이 없고 PG에도 거래 기록이 없으면, 무시된다.")
+        @Test
+        void doesNothing_whenNoLocalPaymentAndPgHasNoRecord() {
+            // arrange
+            OrderModel order = savedOrder(1L);
+            order.startPayment();
+            orderJpaRepository.save(order);
+            when(pgPaymentClient.getTransaction(anyString(), eq("UNKNOWN-KEY")))
+                .thenThrow(new CoreException(ErrorType.NOT_FOUND, "결제건이 존재하지 않습니다."));
+
+            // act (예외 없이 실행)
+            paymentFacade.handleCallback("UNKNOWN-KEY", order.getId());
+
+            // assert
+            assertThat(paymentJpaRepository.findByTransactionKey("UNKNOWN-KEY")).isEmpty();
         }
     }
 

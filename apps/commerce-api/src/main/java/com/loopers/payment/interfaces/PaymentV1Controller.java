@@ -35,7 +35,7 @@ public class PaymentV1Controller {
     public ApiResponse<Void> handleCallback(
         @RequestBody PaymentV1Dto.CallbackRequest request
     ) {
-        paymentFacade.handleCallback(request.transactionKey());
+        paymentFacade.handleCallback(request.transactionKey(), request.orderId());
         return ApiResponse.success(null);
     }
 
