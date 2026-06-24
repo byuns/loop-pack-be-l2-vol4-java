@@ -7,6 +7,7 @@ import com.loopers.payment.domain.PaymentRepository;
 import com.loopers.payment.domain.PaymentStatus;
 import com.loopers.payment.infrastructure.pg.PgPaymentClient;
 import com.loopers.payment.infrastructure.pg.PgPaymentClientDto;
+import com.loopers.payment.infrastructure.pg.PgRetriableException;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import jakarta.annotation.PostConstruct;
@@ -51,20 +52,14 @@ public class PaymentFacade {
         });
 
         // PG 호출 — 트랜잭션 밖, 커넥션 미점유
+        // 일시적 실패(타임아웃·네트워크·PG 500)는 200ms 간격으로 최대 2회 재시도한다.
+        // 멱등키가 OrderModel에 저장돼 있어 retry 시 같은 키를 재사용하므로 중복 결제가 발생하지 않는다.
+        // CB OPEN(SERVICE_UNAVAILABLE)은 retry 없이 즉시 실패 처리한다.
         PgPaymentClientDto.TransactionResponse pgResponse;
         try {
-            pgResponse = pgPaymentClient.requestPayment(
-                loginId,
-                new PgPaymentClientDto.PaymentRequest(
-                    String.valueOf(orderId),
-                    cardType,
-                    cardNo,
-                    order.getFinalAmount(),
-                    callbackUrl
-                )
-            );
+            pgResponse = requestPaymentWithRetry(loginId, order, orderId, cardType, cardNo);
         } catch (Exception pgException) {
-            // TX C: PG 실패 → Order를 PAYMENT_FAILED로 전이 (재결제 허용 상태)
+            // TX C: 모든 재시도 소진 후 최종 실패 → Order를 PAYMENT_FAILED로 전이 (재결제 허용 상태)
             transactionTemplate.execute(status -> {
                 OrderModel o = orderRepository.find(orderId)
                     .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
@@ -79,6 +74,39 @@ public class PaymentFacade {
             PaymentModel payment = new PaymentModel(orderId, pgResponse.transactionKey(), cardType, order.getFinalAmount(), loginId);
             return PaymentInfo.from(paymentRepository.save(payment));
         });
+    }
+
+    private PgPaymentClientDto.TransactionResponse requestPaymentWithRetry(
+        String loginId, OrderModel order, Long orderId, String cardType, String cardNo
+    ) {
+        int maxAttempts = 3;
+        int waitMillis = 200;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return pgPaymentClient.requestPayment(
+                    loginId,
+                    new PgPaymentClientDto.PaymentRequest(
+                        order.getIdempotencyKey(),
+                        String.valueOf(orderId),
+                        cardType,
+                        cardNo,
+                        order.getFinalAmount(),
+                        callbackUrl
+                    )
+                );
+            } catch (PgRetriableException e) {
+                if (attempt == maxAttempts) {
+                    throw new CoreException(ErrorType.SERVICE_UNAVAILABLE, "결제 시스템이 일시적으로 불가합니다.");
+                }
+                try {
+                    Thread.sleep(waitMillis);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new CoreException(ErrorType.SERVICE_UNAVAILABLE, "결제 요청이 중단되었습니다.");
+                }
+            }
+        }
+        throw new CoreException(ErrorType.SERVICE_UNAVAILABLE, "결제 시스템이 일시적으로 불가합니다.");
     }
 
     @Transactional

@@ -18,12 +18,16 @@ import java.time.LocalDateTime
         Index(name = "idx_user_transaction", columnList = "user_id, transaction_key"),
         Index(name = "idx_user_order", columnList = "user_id, order_id"),
         Index(name = "idx_unique_user_order_transaction", columnList = "user_id, order_id, transaction_key", unique = true),
+        Index(name = "idx_unique_idempotency_key", columnList = "idempotency_key", unique = true),
     ]
 )
 class Payment(
     @Id
     @Column(name = "transaction_key", nullable = false, unique = true)
     val transactionKey: String,
+
+    @Column(name = "idempotency_key", nullable = false, unique = true)
+    val idempotencyKey: String,
 
     @Column(name = "user_id", nullable = false)
     val userId: String,

@@ -5,6 +5,7 @@ import java.util.List;
 public class PgPaymentClientDto {
 
     public record PaymentRequest(
+        String idempotencyKey,
         String orderId,
         String cardType,
         String cardNo,

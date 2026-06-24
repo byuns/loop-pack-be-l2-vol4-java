@@ -203,7 +203,7 @@ PG는 같은 결과를 두 번 보낼 수 있다 (재시도 없는 단발성 호
 
 | 항목 | 이유 |
 |------|------|
-| Retryer | PG 요청 실패 시 재시도 (멱등성 전제 필요) |
+| Retryer | PG 요청 실패 시 재시도 (멱등성 전제 필요) → 결정 11에서 멱등키 구현 완료 |
 | 상태 복구 API or 스케줄러 | 콜백 미수신 건을 PG 조회로 보정 |
 
 ---
@@ -496,6 +496,97 @@ handleCallback(transactionKey, orderId)
 4. **OrderModel에 `loginId` 추가**: PG 재조회(`pgClient.getTransaction`)에는 `X-USER-ID` 헤더(loginId)가 필요하다. 콜백 경로는 인증 없는 엔드포인트이고 PaymentModel도 없으므로, loginId를 얻을 수 있는 유일한 경로가 OrderModel이다. PaymentModel이 이미 `loginId`를 저장하는 이유와 동일하다 — PG 호출 시 사용자 식별이 필요하기 때문이다.
 
 **orderId 위조 가능성.** orderId를 콜백 바디에서 읽는 것은 신뢰하지 않는 외부 입력을 사용하는 것처럼 보이지만, orderId는 경로 탐색에만 사용하고 실제 상태 반영은 `pgClient.getTransaction(transactionKey)`로 PG에서 직접 가져온 값만 사용한다. orderId를 위조해 콜백을 보내도 얻을 수 있는 것은 "없는 Order에 대한 NOT_FOUND 유도"뿐이어서 실질적 보안 위협이 없다.
+
+### 결정 12. Retry 도입 — 일시적 PG 실패 자동 복구
+
+**횟수 결정 근거**
+
+PG 시뮬레이터의 즉시 실패 확률이 40%이므로, 시도 횟수별 누적 성공 확률은 다음과 같다.
+
+| 총 시도 횟수 | 성공 확률 | 타임아웃 시 최악 응답 시간 |
+|-------------|----------|--------------------------|
+| 1회 (retry 없음) | 60.0% | 600ms |
+| 2회 (retry 1회) | 84.0% | 1,200ms |
+| **3회 (retry 2회)** | **93.6%** | **1,800ms** |
+| 4회 (retry 3회) | 97.4% | 2,400ms |
+
+3회(retry 2회)를 채택했다. 4회는 성공률이 3.8%p 더 높지만 응답 시간이 600ms 더 길어진다. 결제는 사용자가 대기하는 작업이므로 추가 대기 비용 대비 이득이 크지 않다.
+
+**retry 대상 구분**
+
+모든 실패에 retry하면 안 된다. FallbackFactory가 원인 타입을 보고 세 가지로 분기한다.
+
+```
+PG 400/404 (비즈니스 에러)   → CoreException(BAD_REQUEST/NOT_FOUND) 그대로 전달 → retry X
+CB OPEN (CallNotPermittedException) → CoreException(SERVICE_UNAVAILABLE)          → retry X
+타임아웃 / 네트워크 / PG 500  → PgRetriableException                               → retry O
+```
+
+CB OPEN 상태에서는 PG 자체가 다운된 것이므로 retry해도 의미가 없다. 오히려 CB의 half-open 복구 판단을 방해한다.
+
+**대기 시간 200ms 고정**
+
+PG 지연 범위가 100~500ms이므로 200ms 대기 후 재시도하면 일시적 부하가 해소됐을 가능성이 충분하다. 지수 백오프(200 → 400 → 800ms)는 대규모 분산 시스템에서 thundering herd를 방지하기 위한 전략으로, 이 시뮬레이터 규모에서는 과하다.
+
+**CB와의 관계**
+
+Retry는 FallbackFactory 바깥(PaymentFacade)에서 수동으로 구현했다. CB OPEN이면 FallbackFactory에서 `CoreException(SERVICE_UNAVAILABLE)`을 던지므로 `PgRetriableException`이 아니어서 retry 루프를 통과하지 않는다 — CB가 바깥, retry가 안쪽인 구조가 자연스럽게 성립한다.
+
+**최종 실패 처리**
+
+retry 3회를 모두 소진했을 때 `CoreException(SERVICE_UNAVAILABLE)`을 던지며, 기존 TX C(Order PAYMENT_FAILED 전이)가 그대로 실행된다.
+
+### 결정 11. 멱등키(Idempotency Key) 도입 — Retry 전제 조건 확보
+
+**배경.** Nice-To-Have로 분류했던 Retryer를 추가하려면 멱등성이 전제되어야 한다. PG 시뮬레이터는 같은 `orderId`로 N번 요청하면 N개의 독립적인 거래를 생성하므로, retry 시 중복 결제가 발생한다. 이를 해결하기 위해 멱등키를 도입했다.
+
+**멱등키 생성 전략 검토**
+
+| 방식 | 판단 |
+|------|------|
+| `orderId` 단독 | 재결제(PAYMENT_FAILED → 새 시도) 시 같은 키 → PG가 첫 실패 결과 반환 → 재결제 불가. 탈락 |
+| `orderId + 타임스탬프` | retry 시 시간이 달라지면 다른 키 → 멱등 의미 없음. 탈락 |
+| `orderId + attempt 번호` | 재결제/retry 구분 가능하지만 attempt 번호를 별도로 관리해야 함 |
+| **타임스탬프 + UUID 앞 12자리** | 시간 순 정렬 가능 + 충돌 없음. 채택 |
+
+**채택한 키 형태**
+
+```
+20260625-143022-a3f2b4c1d5e6
+  yyyyMMdd-HHmmss   UUID 앞 12자리
+```
+
+- 타임스탬프: 발행 시각을 키에서 바로 읽을 수 있어 조회/정렬에 유리
+- UUID: 같은 초에 여러 요청이 들어와도 충돌 없음
+- 이 구조는 UUID v7(타임스탬프 + 랜덤값 조합)과 동일한 개념이다
+
+**생성 위치: `OrderModel.startPayment()`**
+
+`startPayment()`는 결제 시도마다 반드시 한 번 호출되는 진입점이다. 여기서 키를 생성해 `OrderModel`에 저장하면:
+- TX1 커밋과 함께 DB에 영속화됨
+- PG 호출 시 `order.getIdempotencyKey()`로 꺼내서 사용
+- retry 시 같은 Order에서 꺼내므로 동일한 키 재사용 보장
+- 재결제(PAYMENT_FAILED) 시 `startPayment()`가 다시 호출되어 새 키 생성 → PG 입장에서 새 요청
+
+**PG 시뮬레이터 변경 (`PaymentApplicationService.createTransaction`)**
+
+```
+동일 idempotencyKey 수신
+  → DB에 이미 존재 : 기존 Payment 결과 그대로 반환 (새 거래 생성 안 함)
+  → 존재하지 않음  : 정상 처리 후 저장
+```
+
+**변경 파일 요약**
+
+| 위치 | 변경 내용 |
+|------|-----------|
+| `Payment.kt` | `idempotencyKey` 필드 추가 (unique 인덱스) |
+| `PaymentRepository.kt` / `PaymentJpaRepository.kt` / `PaymentCoreRepository.kt` | `findByIdempotencyKey()` 추가 |
+| `PaymentCommand.kt` / `PaymentDto.kt` | `idempotencyKey` 필드 추가 및 검증 |
+| `PaymentApplicationService.kt` | 중복 키 수신 시 기존 결과 반환 |
+| `OrderModel.java` | `idempotencyKey` 필드, `startPayment()`에서 생성 |
+| `PgPaymentClientDto.java` | `PaymentRequest`에 `idempotencyKey` 추가 |
+| `PaymentFacade.java` | PG 요청 시 `order.getIdempotencyKey()` 포함 |
 
 ### 결정 10. `recoverPayment` 비관적 락 — 동시 복구 요청 시 PaymentModel 중복 생성 방지
 

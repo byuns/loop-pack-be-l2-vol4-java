@@ -10,6 +10,7 @@ import com.loopers.support.error.ErrorType
 
 object PaymentDto {
     data class PaymentRequest(
+        val idempotencyKey: String,
         val orderId: String,
         val cardType: CardTypeDto,
         val cardNo: String,
@@ -22,6 +23,9 @@ object PaymentDto {
         }
 
         fun validate() {
+            if (idempotencyKey.isBlank()) {
+                throw CoreException(ErrorType.BAD_REQUEST, "멱등키는 비어있을 수 없습니다.")
+            }
             if (orderId.isBlank() || orderId.length < 6) {
                 throw CoreException(ErrorType.BAD_REQUEST, "주문 ID는 6자리 이상 문자열이어야 합니다.")
             }
@@ -39,6 +43,7 @@ object PaymentDto {
         fun toCommand(userId: String): PaymentCommand.CreateTransaction =
             PaymentCommand.CreateTransaction(
                 userId = userId,
+                idempotencyKey = idempotencyKey,
                 orderId = orderId,
                 cardType = cardType.toCardType(),
                 cardNo = cardNo,

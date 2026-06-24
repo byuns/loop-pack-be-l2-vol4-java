@@ -28,10 +28,17 @@ class PaymentApplicationService(
     fun createTransaction(command: PaymentCommand.CreateTransaction): TransactionInfo {
         command.validate()
 
+        // 같은 멱등키로 이미 처리된 요청이면 기존 결과를 그대로 반환
+        val existing = paymentRepository.findByIdempotencyKey(command.idempotencyKey)
+        if (existing != null) {
+            return TransactionInfo.from(existing)
+        }
+
         val transactionKey = transactionKeyGenerator.generate()
         val payment = paymentRepository.save(
             Payment(
                 transactionKey = transactionKey,
+                idempotencyKey = command.idempotencyKey,
                 userId = command.userId,
                 orderId = command.orderId,
                 cardType = command.cardType,

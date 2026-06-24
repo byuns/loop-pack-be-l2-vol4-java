@@ -7,6 +7,7 @@ import com.loopers.support.error.ErrorType
 object PaymentCommand {
     data class CreateTransaction(
         val userId: String,
+        val idempotencyKey: String,
         val orderId: String,
         val cardType: CardType,
         val cardNo: String,

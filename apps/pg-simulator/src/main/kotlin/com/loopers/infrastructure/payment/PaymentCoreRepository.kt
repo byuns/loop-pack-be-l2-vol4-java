@@ -16,6 +16,11 @@ class PaymentCoreRepository(
     }
 
     @Transactional(readOnly = true)
+    override fun findByIdempotencyKey(idempotencyKey: String): Payment? {
+        return paymentJpaRepository.findByIdempotencyKey(idempotencyKey)
+    }
+
+    @Transactional(readOnly = true)
     override fun findByTransactionKey(transactionKey: String): Payment? {
         return paymentJpaRepository.findById(transactionKey).getOrNull()
     }

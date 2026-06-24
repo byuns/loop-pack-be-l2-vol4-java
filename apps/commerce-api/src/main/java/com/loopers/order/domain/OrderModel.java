@@ -11,7 +11,10 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.UUID;
 
 @Entity
 @Table(name = "orders")
@@ -19,6 +22,7 @@ public class OrderModel extends BaseEntity {
 
     private Long userId;
     private String loginId;
+    private String idempotencyKey;
     private Long couponIssueId;
     private Long originalAmount;
     private Long discountAmount;
@@ -64,6 +68,9 @@ public class OrderModel extends BaseEntity {
         if (this.status != OrderStatus.PENDING_PAYMENT && this.status != OrderStatus.PAYMENT_FAILED) {
             throw new CoreException(ErrorType.BAD_REQUEST, "결제를 시작할 수 없는 주문 상태입니다.");
         }
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        String uuid = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        this.idempotencyKey = timestamp + "-" + uuid;
         this.status = OrderStatus.IN_PAYMENT;
     }
 
@@ -77,6 +84,7 @@ public class OrderModel extends BaseEntity {
 
     public Long getUserId() { return userId; }
     public String getLoginId() { return loginId; }
+    public String getIdempotencyKey() { return idempotencyKey; }
     public OrderStatus getStatus() { return status; }
     public List<OrderItemModel> getItems() { return items; }
     public Long getCouponIssueId() { return couponIssueId; }
