@@ -9,10 +9,13 @@ import com.loopers.payment.infrastructure.pg.PgPaymentClient;
 import com.loopers.payment.infrastructure.pg.PgPaymentClientDto;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Optional;
 
@@ -23,35 +26,59 @@ public class PaymentFacade {
     private final OrderRepository orderRepository;
     private final PaymentRepository paymentRepository;
     private final PgPaymentClient pgPaymentClient;
+    private final PlatformTransactionManager transactionManager;
 
     @Value("${pg.callback-url}")
     private String callbackUrl;
 
-    @Transactional
-    public PaymentInfo requestPayment(Long userId, String loginId, Long orderId, String cardType, String cardNo) {
-        OrderModel order = orderRepository.findWithLock(orderId)
-            .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
+    private TransactionTemplate transactionTemplate;
 
-        if (!order.getUserId().equals(userId)) {
-            throw new CoreException(ErrorType.FORBIDDEN, "접근 권한이 없습니다.");
+    @PostConstruct
+    void init() {
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
+    }
+
+    public PaymentInfo requestPayment(Long userId, String loginId, Long orderId, String cardType, String cardNo) {
+        // TX1: 비관적 락 획득 → startPayment 커밋 → 커넥션 반환
+        OrderModel order = transactionTemplate.execute(status -> {
+            OrderModel o = orderRepository.findWithLock(orderId)
+                .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
+            if (!o.getUserId().equals(userId)) {
+                throw new CoreException(ErrorType.FORBIDDEN, "접근 권한이 없습니다.");
+            }
+            o.startPayment();
+            return orderRepository.save(o);
+        });
+
+        // PG 호출 — 트랜잭션 밖, 커넥션 미점유
+        PgPaymentClientDto.TransactionResponse pgResponse;
+        try {
+            pgResponse = pgPaymentClient.requestPayment(
+                loginId,
+                new PgPaymentClientDto.PaymentRequest(
+                    String.valueOf(orderId),
+                    cardType,
+                    cardNo,
+                    order.getFinalAmount(),
+                    callbackUrl
+                )
+            );
+        } catch (Exception pgException) {
+            // TX C: PG 실패 → Order를 PAYMENT_FAILED로 전이 (재결제 허용 상태)
+            transactionTemplate.execute(status -> {
+                OrderModel o = orderRepository.find(orderId)
+                    .orElseThrow(() -> new CoreException(ErrorType.NOT_FOUND, "주문을 찾을 수 없습니다."));
+                o.failPayment();
+                return orderRepository.save(o);
+            });
+            throw pgException;
         }
 
-        order.startPayment();
-        orderRepository.save(order);
-
-        PgPaymentClientDto.TransactionResponse pgResponse = pgPaymentClient.requestPayment(
-            loginId,
-            new PgPaymentClientDto.PaymentRequest(
-                String.valueOf(orderId),
-                cardType,
-                cardNo,
-                order.getFinalAmount(),
-                callbackUrl
-            )
-        );
-
-        PaymentModel payment = new PaymentModel(orderId, pgResponse.transactionKey(), cardType, order.getFinalAmount(), loginId);
-        return PaymentInfo.from(paymentRepository.save(payment));
+        // TX2: 결제 기록 저장
+        return transactionTemplate.execute(status -> {
+            PaymentModel payment = new PaymentModel(orderId, pgResponse.transactionKey(), cardType, order.getFinalAmount(), loginId);
+            return PaymentInfo.from(paymentRepository.save(payment));
+        });
     }
 
     @Transactional

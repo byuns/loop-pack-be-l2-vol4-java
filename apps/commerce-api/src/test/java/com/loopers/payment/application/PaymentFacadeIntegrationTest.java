@@ -113,9 +113,9 @@ class PaymentFacadeIntegrationTest {
             assertThat(result.getErrorType()).isEqualTo(ErrorType.BAD_REQUEST);
         }
 
-        @DisplayName("PG 호출이 실패하면, 예외가 발생하고 Order 상태는 롤백된다.")
+        @DisplayName("PG 호출이 실패하면, 예외가 발생하고 Order 상태가 PAYMENT_FAILED로 전이된다.")
         @Test
-        void throwsException_andRollbacksOrderStatus_whenPgCallFails() {
+        void throwsException_andSetsOrderToPaymentFailed_whenPgCallFails() {
             // arrange
             OrderModel order = savedOrder(1L);
             when(pgPaymentClient.requestPayment(anyString(), any()))
@@ -128,7 +128,7 @@ class PaymentFacadeIntegrationTest {
 
             // assert
             OrderModel updatedOrder = orderJpaRepository.findById(order.getId()).orElseThrow();
-            assertThat(updatedOrder.getStatus()).isEqualTo(OrderStatus.PENDING_PAYMENT);
+            assertThat(updatedOrder.getStatus()).isEqualTo(OrderStatus.PAYMENT_FAILED);
         }
 
         @DisplayName("PAYMENT_FAILED 주문이면, 재결제가 정상적으로 진행된다.")

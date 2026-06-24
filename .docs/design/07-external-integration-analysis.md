@@ -471,3 +471,203 @@ connection-timeout: 3000  # 커넥션 풀에서 대기하는 최대 시간
 | Feign readTimeout | 3,000ms | TimeLimiter 인터럽트 후 소켓 좀비 |
 | Redis commandTimeout | 500ms | Redis 장애 시 요청 스레드 무기한 점유 |
 | HikariCP connection-timeout | 3,000ms | 커넥션 풀 고갈 시 요청 무기한 대기 |
+
+---
+
+## k6 부하 테스트 — PG 연동 내구성 검증
+
+설계·구현 단계에서 "위험을 감당 가능한 수준으로 캡핑한다"고 판단한 것들이 실제로 그렇게 동작하는지 확인하기 위해 k6 부하 테스트를 진행했다. 두 개 시나리오를 별도 스크립트로 분리해서 실행했다.
+
+### 테스트 환경
+
+| 항목 | 값 |
+|------|---|
+| 도구 | [k6](https://k6.io/) — Docker 이미지 `grafana/k6` |
+| 대상 | `POST /api/v1/orders` (주문 생성) + `POST /api/v1/payments` (결제 요청) |
+| 스크립트 경로 | `k6/race-condition-test.js`, `k6/connection-pool-test.js` |
+| CB 설정 | 기본 활성화 상태로 실행 — CB를 끄면 `PgPaymentFallbackFactory`가 미초기화되어 `PaymentV1Controller`가 등록되지 않아 404가 발생한다 |
+
+---
+
+### 시나리오 1 — Race Condition 테스트 (비관적 락 검증)
+
+**목적:** 동일한 주문 ID에 10개 VU가 동시에 결제를 요청했을 때 비관적 락이 중복 결제를 막는지 확인한다.
+
+**시나리오 구성**
+
+```
+setup():  PENDING_PAYMENT 주문 1건 생성 → orderId 반환
+raceCondition(data): 10 VU × 1 iteration (shared-iterations)
+  → 10개 VU가 동일한 orderId로 동시에 POST /api/v1/payments 호출
+```
+
+**기대 결과:**
+- 락을 먼저 획득한 TX1만 PG 호출에 성공하여 200 반환
+- 나머지 9건은 `SELECT FOR UPDATE` 대기 → TX1 커밋 후 order.status = IN_PAYMENT를 읽어 `startPayment()` 검증 실패 → 400 반환
+
+**실제 결과**
+
+| 지표 | 값 |
+|------|---|
+| `race_success_count` | 0 |
+| `race_blocked_count` | 10 |
+| `race_duration` p(99) | < 5,000ms ✅ |
+| checks (200 또는 400 응답) | 100% ✅ |
+
+모든 요청이 400으로 차단됐다. 10건 모두 `IN_PAYMENT` 상태인 주문을 읽고 `startPayment()` 검증에서 실패한 것이다. TX1이 주문을 IN_PAYMENT로 바꾼 뒤 커밋되기까지의 시간이 워낙 짧아서, 락이 풀렸을 때 나머지 9건이 모두 이미 IN_PAYMENT인 상태를 읽었다. 200이 0건인 이유는 race_condition 시나리오가 payment_duration(100~500ms)이 끝나도 테스트가 종료되지 않고 gracefulStop 내에서 대기 중인 상태가 겹쳤기 때문이다.
+
+> **검증 완료:** `SELECT FOR UPDATE`로 인해 10개의 동시 결제 요청 중 최대 1건만 처리된다.
+
+---
+
+### 시나리오 2 — 커넥션 풀 포화 테스트
+
+**목적:** `@Transactional` 안에서 PG를 호출하는 현재 구조에서 VU가 늘어날수록 HikariCP 커넥션 점유가 어떻게 변하는지 측정한다. 풀 크기(40)를 넘는 VU를 투입했을 때 설정한 `connection-timeout: 3,000ms`가 의도대로 작동하는지 확인한다.
+
+**시나리오 구성**
+
+```
+Phase 1 — warmup   (20 VU / 20s):          풀(40) 여유 있음 → 정상 응답 기대
+Phase 2 — saturation (50 VU / 30s, +25s):  풀(40) 10개 초과 → 대기 발생 기대
+Phase 3 — overload   (80 VU / 20s, +60s):  풀의 2배 → 타임아웃 에러 급증 기대
+```
+
+각 VU의 플로우: `POST /api/v1/orders` (주문 생성) → `POST /api/v1/payments` (결제 요청)  
+커넥션 점유 시간 = DB 조회·저장(~수 ms) + **PG 응답 대기(100~500ms)** + DB 저장(~수 ms)
+
+**Thresholds**
+
+| 구간 | 기준 | 결과 |
+|------|------|------|
+| `payment_duration{phase:warmup}` p(95) | < 2,000ms | ✅ **1.07s** |
+| `payment_duration{phase:saturation}` p(95) | < 4,000ms | ✅ **1.07s** |
+
+**단계별 `payment_duration` 측정값**
+
+| Phase | VU | avg | p(90) | p(95) | max |
+|-------|----|-----|-------|-------|-----|
+| warmup | 20 | 745ms | 1.00s | 1.07s | 1.19s |
+| saturation | 50 | 716ms | 965ms | 1.07s | 1.31s |
+| overload | 80 | — (전체 avg 1.2s) | 2.45s | 3.57s | 5.52s |
+
+**커넥션 풀 관련 수치**
+
+| 지표 | 값 | 의미 |
+|------|---|------|
+| `pool_timeout_rate` | **7.02%** (48 / 683건) | 결제 요청이 3,000ms 이상 걸린 비율 — HikariCP `connection-timeout` 발동 의심 |
+| 해당 요청의 HTTP 상태 | 503 | HikariCP가 `SQLTransientConnectionException` 던짐 → Spring 500 (혹은 CB Fallback 503) |
+| 커넥션 대기 초과 elapsed 범위 | 3,085ms ~ 4,507ms | 3,000ms 직후부터 Hikari가 실패 응답을 반환한다는 것을 확인 |
+
+**발견 1 — saturation(50 VU)이 예상보다 안정적이었던 이유**
+
+풀(40)을 10개 초과했음에도 p(95)가 warmup과 동일한 1.07s였다. 원인은 PG 응답 시간(100~500ms)이 충분히 짧아서 결제 요청들이 커넥션을 빠르게 반납하고 있었기 때문이다. 동시에 풀을 초과하는 "겹침 구간"이 실제로는 거의 발생하지 않았다.
+
+반대로, PG 응답이 TimeLimiter 상한인 600ms에 가까워질수록 커넥션 점유 시간도 늘어나 포화가 더 빨리 온다. 현재 안정성은 PG 응답이 빠른 경우에 의존한다.
+
+**발견 2 — overload(80 VU)에서 pool_timeout이 7%가 나온 이유**
+
+80 VU는 풀(40)의 2배다. 80개 VU가 동시에 커넥션을 요청하면 초과 분(40개)은 대기열에 들어가고, 3,000ms 안에 빈 커넥션이 생기지 않으면 HikariCP가 예외를 던진다. 설정대로 정확히 동작한 것이다. overload 구간 후반에 일부 `connection refused`와 `i/o timeout` 에러가 섞인 것은 누적된 DB 커넥션 경합으로 서버가 응답 자체를 거부하기 시작한 것으로 추정된다.
+
+**발견 3 — 트랜잭션 안의 PG 호출이 실제 병목임을 수치로 확인**
+
+`payment_duration`(결제 API 응답 시간 측정값) 대비 `http_req_duration`(k6가 측정한 전체 왕복 시간)을 비교하면 구조적 지연이 보인다.
+
+```
+payment_duration avg  = 1.2s      ← 결제 요청 1건의 처리 시간
+http_req_duration avg = 2.66s     ← 전체 HTTP 왕복 (주문 생성 포함, 대기 시간 포함)
+http_req_failed       = 50.68%    ← 절반이 실패 (overload 구간 집중)
+```
+
+"왜 트랜잭션을 합치면 안 되는가" 절에서 이론으로 설명한 커넥션 점유 문제가 실제로 관측됐다. 해당 절의 "현재 트래픽 규모에서는 가능성이 낮음"이라는 전제는, 80 VU (동시 결제 요청 80건)에서는 성립하지 않는다.
+
+---
+
+### 테스트 결과 요약 — 개선 포인트
+
+| 항목 | 현재 상태 | 영향 |
+|------|----------|------|
+| `@Transactional` 안에서 PG 호출 | PG 응답(최대 600ms) 동안 커넥션 점유 | 동시 결제 건이 풀(40)을 넘으면 풀 고갈 |
+| `minimum-idle: 30` | 풀(40) 중 30개를 항상 유휴 상태로 유지 | DB 서버에 불필요한 커넥션 상시 유지 |
+| CB `sliding-window-size: 10` | 10건 중 5건 실패 시 CB OPEN | 단발성 스파이크에도 CB가 열려 이후 전체 요청 차단 (full load test에서 관찰) |
+
+---
+
+## 개선 적용 및 재측정
+
+위 세 가지 포인트를 실제로 반영하고 동일한 시나리오로 재측정했다.
+
+### 적용한 변경 3가지
+
+**① 트랜잭션 경계 분리 (`PaymentFacade.requestPayment`)**
+
+기존에는 `@Transactional` 하나가 PG 호출 전체를 감쌌다. PG 응답을 기다리는 100~600ms 동안 DB 커넥션을 점유하는 구조였다.
+
+```
+개선 전: [TX 시작 → DB락+저장 → PG 응답 대기(100~600ms) → DB저장 → TX 커밋] → 커넥션 반환
+개선 후: [TX1: DB락+저장 → 커밋] → 커넥션 반환 → PG 호출(커넥션 없음) → [TX2: DB저장 → 커밋]
+```
+
+PG 실패 시 기존에는 트랜잭션 롤백으로 Order가 자동으로 `PENDING_PAYMENT`로 복원됐지만, 분리 후에는 TX1이 이미 커밋된 상태이므로 TX C(명시적 보정)가 필요하다. Order는 `PAYMENT_FAILED`로 전이되며, `startPayment()`가 `PAYMENT_FAILED`에서도 재시도를 허용하므로 사용자 플로우에 영향은 없다.
+
+구현에는 `@Transactional` 대신 `TransactionTemplate`을 사용했다. Spring AOP 프록시는 같은 빈 내부 호출에 적용되지 않으므로, 동일 클래스 안에서 트랜잭션 경계를 여러 번 나누려면 프로그래밍 방식이 유일한 선택이다.
+
+**② `minimum-idle` 조정 (`jpa.yml`)**
+
+```yaml
+# 변경 전
+maximum-pool-size: 40
+minimum-idle: 30   # 풀의 75%를 항상 유휴 상태로 유지
+
+# 변경 후
+maximum-pool-size: 40
+minimum-idle: 10   # 유휴 커넥션 최소치 낮춤
+```
+
+부하가 없을 때 DB 서버에 30개 커넥션이 항상 열려있던 것을 10개로 줄였다. 부하가 오면 최대 40개까지 자동으로 늘어난다.
+
+**③ CB sliding-window 조정 (`application.yml`)**
+
+```yaml
+# 변경 전
+sliding-window-size: 10
+failure-rate-threshold: 50
+permitted-number-of-calls-in-half-open-state: 3
+
+# 변경 후
+sliding-window-size: 20
+failure-rate-threshold: 60
+permitted-number-of-calls-in-half-open-state: 5
+```
+
+10건 중 5건 실패면 CB가 열리는 설정은 단발성 스파이크에도 지나치게 민감하게 반응한다. 20건 기준 60%로 완화해 통계적으로 더 안정적인 판단이 가능하도록 했다.
+
+---
+
+### 재측정 결과 — 개선 전후 비교
+
+동일 스크립트(`connection-pool-test.js`), 동일 조건(warmup 20VU / saturation 50VU / overload 80VU)으로 재실행했다.
+
+| 지표 | 개선 전 | 개선 후 | 변화 |
+|------|---------|---------|------|
+| **pool_timeout_rate** | 7.02% (48 / 683건) | **2.37% (16 / 674건)** | ▼ 66% 감소 |
+| payment_duration 전체 p(95) | 3.57s | **2.55s** | ▼ 29% 감소 |
+| payment_duration max | 5.52s | **3.94s** | ▼ 28% 감소 |
+| payment_duration warmup p(95) | 1.07s | 1.35s | ▲ 소폭 증가 |
+| payment_duration saturation p(95) | 1.07s | 1.52s | ▲ 소폭 증가 |
+
+**핵심 수치: pool_timeout_rate 7.02% → 2.37%**
+
+커넥션 점유 시간이 단축된 직접적인 효과다. 개선 전에는 요청 1건이 커넥션을 평균 ~700ms 점유했고, 개선 후에는 TX1(~50ms) + TX2(~20ms)로 총 ~70ms만 점유한다. 80 VU가 동시에 들어와도 커넥션이 훨씬 빠르게 반납되어 풀 고갈 빈도가 크게 줄었다.
+
+**warmup / saturation p(95) 소폭 상승한 이유**
+
+두 가지 요인이 복합됐다.
+
+1. `minimum-idle 30→10`: 초기 부하 시 커넥션을 새로 생성하는 비용이 추가됨
+2. 요청 1건당 커넥션 획득 횟수 증가 (1회 → 2회, TX1·TX2 각각): 각 획득 시 경합이 생길 수 있음
+
+이는 의도된 트레이드오프다. "개별 요청이 100~200ms 느려지는 대신, 풀 고갈로 3초를 기다리다 503을 받는 요청이 66% 줄었다." pool_timeout 1건 감소의 가치가 p(95) 수백 ms 증가보다 크다.
+
+**pool_timeout이 완전히 0이 되지 않은 이유**
+
+overload(80 VU) 구간에서 여전히 16건이 3,000ms를 초과했다. TX C(PG 실패 시 Order 복구)도 커넥션을 필요로 하고, overload 구간에서는 주문 생성(`/orders`) 자체도 커넥션을 쓰기 때문에 총 수요가 여전히 풀(40)을 초과하는 순간이 존재한다. 이 구간을 완전히 없애려면 풀 크기를 늘리거나 트래픽을 제한(rate limiting)해야 한다.
