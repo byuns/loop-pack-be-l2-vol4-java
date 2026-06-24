@@ -15,7 +15,7 @@
   - A (RestTemplate): 직접 구현. 서킷 브레이커·Timeout·Fallback을 모두 코드로 붙여야 함
   - B (FeignClient): `spring.cloud.openfeign.circuitbreaker.enabled: true` + yml 설정만으로 Resilience4j 서킷 브레이커·TimeLimiter·Fallback 연동
 - 최종 결정: **B**
-- 트레이드오프: A는 `RestTemplate` 호출 코드 외에 `@CircuitBreaker`, `@TimeLimiter`, fallback 메서드, 에러 응답 파싱을 모두 직접 붙여야 한다. B는 `sliding-window-size`, `failure-rate-threshold`, `timeout-duration` 등 Resilience4j 설정을 yml에만 작성하면 FeignClient가 자동으로 연동한다. 단, PG가 4xx/5xx를 반환할 때 Feign은 기본적으로 `FeignException` 하나로 뭉쳐버리므로, 에러 종류(404 없음 / 400 검증 실패 등)를 구분하려면 `ErrorDecoder`를 별도로 구현해야 한다. 이 부분은 복구 API 확장(결정 5) 시점에 실제로 필요해져서 그때 추가했다.
+- 트레이드오프: A는 `RestTemplate` 호출 코드 외에 `@CircuitBreaker`, `@TimeLimiter`, fallback 메서드, 에러 응답 파싱을 모두 직접 붙여야 한다. B는 `sliding-window-size`, `failure-rate-threshold`, `timeout-duration` 등 Resilience4j 설정을 yml에만 작성하면 FeignClient가 자동으로 연동한다. 단, PG가 4xx/5xx를 반환할 때 Feign은 기본적으로 `FeignException` 하나로 뭉쳐버리므로, 에러 종류(404 없음 / 400 검증 실패 등)를 구분하려면 `ErrorDecoder`를 별도로 구현해야 한다. 이 부분은 복구 API 확장(결정 4) 시점에 실제로 필요해져서 그때 추가했다.
 
 ---
 
@@ -25,23 +25,11 @@
   - A (단일 트랜잭션): `@Transactional` 하나가 `startPayment` + PG 호출 + `paymentRepository.save` 전체를 감쌈. PG 실패 시 자동 롤백으로 Order가 PENDING_PAYMENT로 복원됨.
   - B (트랜잭션 분리): `[트랜잭션1] startPayment → 커밋` → `PG 호출(커넥션 없음)` → `[트랜잭션2] 저장`. PG 실패 시 트랜잭션 C(명시적 보정)로 Order를 PAYMENT_FAILED로 전이.
 - 최종 결정: **초기에는 A, k6 부하 테스트 후 B로 전환**
-- 트레이드오프: A는 구조가 단순하고 PG 실패 시 롤백으로 자동 복원되지만, 80명의 가상 유저 부하 테스트에서 `pool_timeout_rate` 7.02%가 실측됐다. PG 응답을 기다리는 100~600ms 동안 커넥션을 점유하는 구조가 실제로 풀 고갈을 일으킨다는 걸 수치로 확인했다. B로 전환 후 동일 조건에서 2.37%로 66% 감소. B의 단점은 PG 호출이 실패했을 때 상태를 되돌리는 보정 트랜잭션(트랜잭션 C)이 추가로 필요하다는 점이다. 이 보정 자체가 실패하면 주문이 결제 진행 중 상태에 멈춰 사용자가 재결제를 시도할 수 없게 된다. 발생 가능성은 매우 낮지만, 이런 상황이 생기더라도 복구 API(결정 5)로 수동으로 상태를 바로잡을 수 있다.
+- 트레이드오프: A는 구조가 단순하고 PG 실패 시 롤백으로 자동 복원되지만, 80명의 가상 유저 부하 테스트에서 `pool_timeout_rate` 7.02%가 실측됐다. PG 응답을 기다리는 100~600ms 동안 커넥션을 점유하는 구조가 실제로 풀 고갈을 일으킨다는 걸 수치로 확인했다. B로 전환 후 동일 조건에서 2.37%로 66% 감소. B의 단점은 PG 호출이 실패했을 때 상태를 되돌리는 보정 트랜잭션(트랜잭션 C)이 추가로 필요하다는 점이다. 이 보정 자체가 실패하면 주문이 결제 진행 중 상태에 멈춰 사용자가 재결제를 시도할 수 없게 된다. 발생 가능성은 매우 낮지만, 이런 상황이 생기더라도 복구 API(결정 4)로 수동으로 상태를 바로잡을 수 있다.
 
 ---
 
-**[결정 3] 동시 결제 요청 방어 — 비관적 락 (초기 구현 후 보완)**
-
-- 배경: 초기 구현(`orderRepository.find` + `order.startPayment()`)에는 락이 없었다. 실패 케이스 분석 과정에서 "같은 주문에 동시 요청이 오면 두 트랜잭션이 동일한 PENDING_PAYMENT 스냅샷을 읽고 둘 다 PG 호출에 성공할 수 있다"는 걸 뒤늦게 인식했다.
-- 고려한 대안:
-  - A (낙관적 락): version 컬럼으로 충돌 감지 → 충돌 시 재시도. 실패 후 예외가 사용자에게 노출될 수 있음.
-  - B (비관적 락): `SELECT ... FOR UPDATE`로 먼저 온 요청이 락을 잡고, 뒤따라온 요청은 대기 후 IN_PAYMENT 상태를 확인해 BAD_REQUEST 반환.
-- 최종 결정: **B**
-- 트레이드오프: A는 충돌이 감지되면 예외를 던지고 재시도하는데, 재시도 전에 이미 첫 번째 요청이 PG 호출까지 도달했을 수 있다. 두 번째 요청도 재시도에서 PG를 호출하면 같은 주문에 PG 거래가 2건 생긴다. B는 `SELECT FOR UPDATE`로 첫 번째 요청이 락을 잡는 순간 두 번째 요청은 DB에서 대기하다, 첫 번째 요청이 끝난 후 IN_PAYMENT 상태를 보고 `startPayment()` 검증에서 즉시 실패한다. PG 호출은 최대 1회로 보장된다. 락은 같은 `orderId`를 가진 요청끼리만 경합하므로 전체 처리량에 미치는 영향은 미미하다.
-- **후속 보완**: 복구 API(`recoverPayment`)에도 동일한 이유로 비관적 락을 추가했다. 복구 API와 타임아웃 직후 콜백이 동시에 들어오면 둘 다 `existingPayment.isEmpty() = true`를 읽어 PaymentModel을 중복 생성할 수 있다. 핵심은 **락 선점이 isEmpty 체크보다 반드시 앞이어야 한다는 점**이다. 순서가 반대면 두 요청 모두 isEmpty=true를 확인한 뒤 락을 잡으므로 여전히 중복이 발생한다.
-
----
-
-**[결정 4] Fallback — 무조건 대체 응답 vs 원인 판별**
+**[결정 3] Fallback — 무조건 대체 응답 vs 원인 판별**
 
 - 고려한 대안:
   - A (PgPaymentFallback): 예외 종류에 관계없이 항상 "서비스 불가" 반환
@@ -52,7 +40,7 @@
 
 ---
 
-**[결정 5] 복구 API 범위 — transactionKey 기반 vs orderId 기반 확장**
+**[결정 4] 복구 API 범위 — transactionKey 기반 vs orderId 기반 확장**
 
 - 고려한 대안:
   - A (transactionKey 기반): 로컬에 PaymentModel(PENDING)이 있을 때만 PG에 재조회해 상태 보정
@@ -62,7 +50,7 @@
 
 ---
 
-**[결정 6] 멱등키 도입 및 Retry — 일시적 PG 실패 자동 복구**
+**[결정 5] 멱등키 도입 및 Retry — 일시적 PG 실패 자동 복구**
 
 - 배경: PG가 40% 확률로 즉시 실패를 반환하고 타임아웃도 발생하는 환경에서, 일시적 실패를 자동으로 재시도하면 사용자 경험이 개선된다. 단, retry는 중복 결제를 유발할 수 있어 같은 요청을 여러 번 보내도 PG가 한 번만 처리해주는 것이 보장되어야 한다.
 - 고려한 대안:
