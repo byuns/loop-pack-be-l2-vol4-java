@@ -1,4 +1,4 @@
-# [Challenge Story] 설정했는데 왜 CB가 이렇게 동작하지? — Resilience4j 함정 2가지 (6주차 · 6팀 · 변승진)
+# [Challenge Story] Resilience4j CB, 설정만 믿으면 안 된다 (6주차 · 6팀 · 변승진)
 
 ## TL;DR
 
