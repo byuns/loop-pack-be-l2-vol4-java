@@ -6,6 +6,8 @@ import com.loopers.like.domain.LikeModel;
 import com.loopers.like.domain.LikeRegistrationPolicy;
 import com.loopers.like.domain.LikeRepository;
 import com.loopers.like.domain.LikeService;
+import com.loopers.like.domain.event.LikeAddedEvent;
+import com.loopers.like.domain.event.LikeCancelledEvent;
 import com.loopers.product.application.ProductInfo;
 import com.loopers.product.domain.ProductModel;
 import com.loopers.product.domain.ProductRepository;
@@ -14,6 +16,7 @@ import com.loopers.stock.domain.StockRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,6 +37,7 @@ public class LikeFacade {
     private final StockRepository stockRepository;
     private final BrandRepository brandRepository;
     private final LikeRegistrationPolicy likeRegistrationPolicy;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Caching(evict = {
         @CacheEvict(cacheNames = "product", key = "#productId"),
@@ -46,7 +50,7 @@ public class LikeFacade {
 
         LikeModel like = likeService.createLike(userId, productId);
         LikeInfo saved = LikeInfo.from(likeRepository.save(like));
-        productRepository.incrementLikeCount(productId);
+        eventPublisher.publishEvent(new LikeAddedEvent(productId));
         return saved;
     }
 
@@ -58,7 +62,7 @@ public class LikeFacade {
     public void cancelLike(Long userId, Long productId) {
         LikeModel like = likeService.cancelLike(likeRepository.findByUserIdAndProductId(userId, productId));
         likeRepository.delete(like);
-        productRepository.decrementLikeCount(productId);
+        eventPublisher.publishEvent(new LikeCancelledEvent(productId));
     }
 
     @Transactional(readOnly = true)

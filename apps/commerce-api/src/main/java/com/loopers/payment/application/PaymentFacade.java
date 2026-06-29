@@ -8,11 +8,14 @@ import com.loopers.payment.domain.PaymentStatus;
 import com.loopers.payment.infrastructure.pg.PgPaymentClient;
 import com.loopers.payment.infrastructure.pg.PgPaymentClientDto;
 import com.loopers.payment.infrastructure.pg.PgRetriableException;
+import com.loopers.payment.domain.event.PaymentConfirmedEvent;
+import com.loopers.payment.domain.event.PaymentFailedEvent;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,6 +31,7 @@ public class PaymentFacade {
     private final PaymentRepository paymentRepository;
     private final PgPaymentClient pgPaymentClient;
     private final PlatformTransactionManager transactionManager;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Value("${pg.callback-url}")
     private String callbackUrl;
@@ -207,9 +211,11 @@ public class PaymentFacade {
         if ("SUCCESS".equals(pgStatus)) {
             payment.confirm();
             order.confirm();
+            eventPublisher.publishEvent(new PaymentConfirmedEvent(order.getId(), order.getFinalAmount()));
         } else {
             payment.fail();
             order.failPayment();
+            eventPublisher.publishEvent(new PaymentFailedEvent(order.getId()));
         }
 
         paymentRepository.save(payment);

@@ -74,6 +74,8 @@ class ConcurrencyIntegrationTest {
         startLatch.countDown();
         doneLatch.await(10, TimeUnit.SECONDS);
         executor.shutdown();
+        // [fix] likeCount 업데이트는 AFTER_COMMIT @Async 리스너에서 처리되므로 eventual consistency 대기
+        Thread.sleep(1000);
 
         // assert
         ProductModel updated = productJpaRepository.findById(product.getId()).orElseThrow();

@@ -24,6 +24,21 @@
 - `support/event/UserActionEvent.java`, `UserActionEventListener.java`
 - `payment/domain/event/PaymentConfirmedEvent.java`, `PaymentFailedEvent.java`
 - `payment/application/PaymentEventListener.java`
+- `config/AsyncConfig.java` — `@EnableAsync`
+
+**구현 결과 (완료)**
+
+- `LikeFacade.addLike/cancelLike` — `incrementLikeCount`/`decrementLikeCount` 직접 호출 제거 → `LikeAddedEvent`/`LikeCancelledEvent` 발행으로 교체
+- `OrderFacade.createOrder()` — `UserActionEvent(userId, "ORDER", "order", orderId)` 발행 추가
+- `PaymentFacade.applyPgResult()` — SUCCESS 시 `PaymentConfirmedEvent`, 실패 시 `PaymentFailedEvent` 발행
+
+**LikeEventListener 트레이드오프**
+
+`@TransactionalEventListener(AFTER_COMMIT)` 단독으로는 커밋 이후 원본 커넥션이 아직 반환되지 않은 상태에서 `@Transactional(REQUIRES_NEW)`가 새 커넥션을 요청 → 동시 요청 시 커넥션 풀 고갈.
+
+→ `@Async` 추가로 별도 스레드에서 실행. 원본 커넥션 반환 후 새 커넥션 획득하므로 풀 고갈 없음.
+→ likeCount 업데이트가 **eventual consistency** 로 처리됨 (addLike 응답 시점엔 미반영).
+→ Step 2에서 Outbox로 교체 예정.
 
 ---
 
@@ -96,6 +111,6 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 ## 구현 순서
 
-- [ ] Step 1: 이벤트 클래스 + 리스너 작성, 각 Facade 수정
+- [x] Step 1: 이벤트 클래스 + 리스너 작성, 각 Facade 수정
 - [ ] Step 2: outbox 테이블 생성, OutboxPoller, MetricsConsumer
 - [ ] Step 3: coupon_issue_requests 테이블, CouponIssueConsumer, 결과 조회 API
