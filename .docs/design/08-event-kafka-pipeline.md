@@ -52,7 +52,16 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 
 **Producer 설정:** `acks=all`, `enable-idempotence=true`
 
-**OutboxPoller 트레이드오프**
+**Outbox 선택 트레이드오프**
+
+| | `@TransactionalEventListener` | Outbox + Kafka |
+|---|---|---|
+| 이벤트 유실 | JVM 크래시 시 유실 | DB에 남아 복구 가능 |
+| 구현 복잡도 | 낮음 | 높음 (테이블, Poller 필요) |
+| 지연 | 커밋 직후 즉시 | Poller 주기만큼 지연 |
+| 중복 처리 | 없음 | Consumer 멱등 처리 필요 |
+
+**Outbox 사용 시 주의사항**
 
 | 문제 | 원인 | 해결 |
 |---|---|---|
