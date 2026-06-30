@@ -13,7 +13,9 @@ spring:
         use.latest.version: true
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
-      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # [fix] Outbox payload는 이미 JSON 문자열인데 JsonSerializer가 한 번 더 직렬화(이중 인코딩)해
+      #       Consumer의 readTree가 객체가 아닌 TextNode로 파싱돼 NPE 발생 → StringSerializer로 대칭(String↔String) 정렬
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
       retries: 3
     consumer:
       group-id: loopers-default-consumer

@@ -163,11 +163,59 @@ ObjectMapper로 직렬화 (LikeFacade의 문자열 concat과 달리 items가 있
 
 ---
 
-### Consumer — 미구현
+### Consumer — 완료
 
-- `commerce-collector` 모듈에서 `order-events` 구독
-- `product_metrics` 테이블에 sales_count upsert
-- manual Ack + `event_handled` 테이블로 멱등 처리
+좋아요 Consumer와 같은 패턴으로 `commerce-streamer` 모듈에 구현. `commerce-collector`는 별도 모듈로 분리하지 않고, 재사용 대상(`ProductMetricsModel`, `event_handled`)과 좋아요 Consumer가 이미 있는 `commerce-streamer`에 함께 두었다.
+
+`order-events` 구독 → payload의 `items`를 순회하며 `product_metrics.sales_count`를 `quantity`만큼 upsert. payload가 self-contained라 추가 API 호출 없음.
+
+**생성 파일**
+- `payment/application/SalesItem.java` — payload `items` 한 건 (`productId`, `quantity`) record
+- `payment/application/SalesAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + items별 `sales_count` 증감 (기존 `ProductMetricsRepository`·`EventHandledRepository`·`ProductMetricsModel.addSalesCount` 재사용)
+- `payment/interfaces/consumer/PaymentEventConsumer.java` — `@KafkaListener(topics="order-events", groupId="sales-aggregator")`, manual Ack
+
+**테스트 파일** (단위)
+- `SalesAggregatorServiceTest` — 신규 eventId 집계 / 멱등 skip / metrics 신규 생성 / 같은 productId 누적
+- `PaymentEventConsumerTest` — ORDER_CONFIRMED 파싱+호출+ack / 미지원 eventType skip+ack / 서비스 예외 시 ack 안 함
+
+**처리 흐름** (좋아요 Consumer와 동일)
+
+```
+1. order-events에 ORDER_CONFIRMED 도착
+2. Consumer 수신 → eventId = "order-events:" + partition + ":" + offset
+3. @Transactional 내부:
+   a. event_handled에 eventId 존재? → 있으면 skip
+   b. event_handled INSERT (멱등 기록)
+   c. items 순회: product_metrics.sales_count += quantity (없으면 새로 생성)
+4. ack.acknowledge() → offset commit
+5. 처리 실패 → ack 안 함 → 다음 poll에 재시도
+```
+
+**Consumer group**: `sales-aggregator` (like-aggregator와 group·토픽 모두 분리)
+
+**알려진 한계**: 좋아요 Consumer와 동일 — Producer 재시작 후 중복(eventId가 Kafka 좌표 기반), DLT 미구현. 후속 보강 대상.
+
+---
+
+### Consumer 통합 검증 (Testcontainers) — 완료
+
+좋아요·결제 Consumer를 실제 Kafka(`apache/kafka:3.8.1` Testcontainer) + MySQL로 end-to-end 검증.
+
+**테스트 파일**: `apps/commerce-streamer/.../consumer/EventConsumerIntegrationTest.java`
+- `catalog-events`에 `LIKE_ADDED` 발행 → `product_metrics.like_count == 1`, `event_handled` 1건
+- `order-events`에 `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 1건
+- `OutboxPoller`와 동일하게 `kafkaTemplate.send(topic, key, payload문자열)`로 발행, Awaitility로 비동기 반영 대기
+- 테스트는 발행 후 Consumer가 붙으므로 `auto.offset.reset=earliest`로 override (운영 default는 `latest`)
+
+**검증으로 발견·수정한 버그 — 이중 직렬화 (둘 다 깨져 있었음)**
+
+Producer의 `value-serializer`가 `JsonSerializer`였는데, Outbox `payload`는 이미 `ObjectMapper`로 직렬화된 **JSON 문자열**이다. JsonSerializer가 이 문자열을 한 번 더 직렬화 → `"{\"eventType\":...}"`처럼 바깥에 따옴표가 덧씌워진 채 발행됨.
+
+Consumer는 `StringDeserializer`로 받아 `objectMapper.readTree(value)` 했으나, 값이 JSON 객체가 아니라 **JSON 문자열 리터럴**이라 `TextNode`로 파싱됨 → `.get("eventType")`이 `null` → NPE → ack 안 됨 → lag 무한 누적.
+
+→ **수정**: `kafka.yml` producer `value-serializer`를 `JsonSerializer` → `StringSerializer`로 변경. payload가 이미 JSON 문자열이므로 Consumer(`StringDeserializer`)와 String↔String 대칭이 맞다. 유일한 실제 Producer는 `OutboxPoller`(문자열 발행)라 부작용 없음.
+
+> 교훈: Producer/Consumer 직렬화 짝은 항상 같이 맞춰야 한다. payload를 애플리케이션에서 직접 문자열로 만들면 serializer는 String 계열이어야 하고, 객체를 그대로 넘기면 Json 계열이어야 한다. 섞이면 조용히 이중 인코딩된다.
 
 ---
 
@@ -351,6 +399,6 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 
 | 도메인 | ApplicationEvent | Outbox Producer | Consumer |
 |---|---|---|---|
-| 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (검증 미완) |
-| 결제 | ✅ 완료 | ✅ 완료 | ⬜ 미구현 |
+| 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
+| 결제 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
 | 쿠폰 | — | — | ⬜ 미구현 |

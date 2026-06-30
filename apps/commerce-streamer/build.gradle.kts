@@ -20,4 +20,7 @@ dependencies {
     testImplementation(testFixtures(project(":modules:jpa")))
     testImplementation(testFixtures(project(":modules:redis")))
     testImplementation(testFixtures(project(":modules:kafka")))
+
+    // Kafka Testcontainer (Consumer 통합 검증용)
+    testImplementation("org.testcontainers:kafka")
 }
