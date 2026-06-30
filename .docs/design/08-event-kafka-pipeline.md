@@ -101,13 +101,27 @@ ApplicationEvent 방식의 유실 문제를 해결하기 위해 Outbox로 교체
 
 ---
 
-### Outbox + Kafka Producer — 미구현
+### Outbox + Kafka Producer — 완료
 
 `PaymentFacade.applyPgResult()` SUCCESS 분기에 `order-events` outbox INSERT 추가.
 
 `PaymentConfirmedEvent`(알림용)와 Outbox INSERT(집계용)는 목적이 달라 공존한다.
 
 **토픽:** `order-events` / Partition Key: `orderId`
+
+**payload 구조** (self-contained — Consumer가 추가 API 호출 없이 sales_count upsert 가능):
+```json
+{
+  "eventType": "ORDER_CONFIRMED",
+  "orderId": 123,
+  "items": [
+    {"productId": 1, "quantity": 2},
+    {"productId": 2, "quantity": 1}
+  ]
+}
+```
+
+ObjectMapper로 직렬화 (LikeFacade의 문자열 concat과 달리 items가 있어 escape 문제 방지).
 
 ---
 
@@ -253,5 +267,5 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 | 도메인 | ApplicationEvent | Outbox Producer | Consumer |
 |---|---|---|---|
 | 좋아요 | ✅ 완료 | ✅ 완료 | ⬜ 미구현 |
-| 결제 | ✅ 완료 | ⬜ 미구현 | ⬜ 미구현 |
+| 결제 | ✅ 완료 | ✅ 완료 | ⬜ 미구현 |
 | 쿠폰 | — | — | ⬜ 미구현 |

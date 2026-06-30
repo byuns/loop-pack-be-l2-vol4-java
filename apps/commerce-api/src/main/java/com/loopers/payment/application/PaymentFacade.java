@@ -12,6 +12,10 @@ import com.loopers.payment.domain.event.PaymentConfirmedEvent;
 import com.loopers.payment.domain.event.PaymentFailedEvent;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import com.loopers.support.outbox.OutboxEvent;
+import com.loopers.support.outbox.OutboxRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -21,6 +25,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 @RequiredArgsConstructor
@@ -32,6 +38,8 @@ public class PaymentFacade {
     private final PgPaymentClient pgPaymentClient;
     private final PlatformTransactionManager transactionManager;
     private final ApplicationEventPublisher eventPublisher;
+    private final OutboxRepository outboxRepository;
+    private final ObjectMapper objectMapper;
 
     @Value("${pg.callback-url}")
     private String callbackUrl;
@@ -212,6 +220,12 @@ public class PaymentFacade {
             payment.confirm();
             order.confirm();
             eventPublisher.publishEvent(new PaymentConfirmedEvent(order.getId(), order.getFinalAmount()));
+            outboxRepository.save(OutboxEvent.of(
+                "order-events",
+                "ORDER_CONFIRMED",
+                String.valueOf(order.getId()),
+                buildOrderConfirmedPayload(order)
+            ));
         } else {
             payment.fail();
             order.failPayment();
@@ -220,5 +234,22 @@ public class PaymentFacade {
 
         paymentRepository.save(payment);
         orderRepository.save(order);
+    }
+
+    private String buildOrderConfirmedPayload(OrderModel order) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("eventType", "ORDER_CONFIRMED");
+        payload.put("orderId", order.getId());
+        payload.put("items", order.getItems().stream()
+            .map(item -> Map.of(
+                "productId", item.getProductId(),
+                "quantity", item.getQuantity()
+            ))
+            .toList());
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new CoreException(ErrorType.INTERNAL_ERROR, "ORDER_CONFIRMED payload 직렬화 실패");
+        }
     }
 }
