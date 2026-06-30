@@ -72,13 +72,12 @@ class EventConsumerIntegrationTest {
         assertThat(eventHandledJpaRepository.count()).isEqualTo(1L);
     }
 
-    @DisplayName("order-events에 ORDER_CONFIRMED를 발행하면, sales-aggregator Consumer가 items별 sales_count를 증가시킨다.")
+    @DisplayName("order-events에 ORDER_CONFIRMED를 발행하면, sales-aggregator Consumer가 items별 sales_count를 증가시키고 멱등 키로 orderId를 기록한다.")
     @Test
     void incrementsSalesCount_whenOrderConfirmedPublished() {
         // arrange
         long orderId = 123L;
-        String payload = "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":" + orderId + ","
-            + "\"items\":[{\"productId\":1,\"quantity\":2},{\"productId\":2,\"quantity\":1}]}";
+        String payload = orderConfirmedPayload(orderId);
 
         // act
         kafkaTemplate.send("order-events", String.valueOf(orderId), payload);
@@ -92,6 +91,37 @@ class EventConsumerIntegrationTest {
             assertThat(m1.getSalesCount()).isEqualTo(2L);
             assertThat(m2.getSalesCount()).isEqualTo(1L);
         });
+        assertThat(eventHandledJpaRepository.existsByEventId("order:" + orderId)).isTrue();
         assertThat(eventHandledJpaRepository.count()).isEqualTo(1L);
+    }
+
+    @DisplayName("같은 orderId의 ORDER_CONFIRMED가 (Kafka 좌표가 다른) 2건 도착해도, orderId 멱등 키 덕분에 sales_count는 1회만 반영된다.")
+    @Test
+    void appliesSalesCountOnce_whenSameOrderIdPublishedTwice() {
+        // arrange — 동일 payload를 두 번 발행 → 서로 다른 offset(=과거 좌표 멱등이라면 못 막던 케이스)
+        long orderId = 777L;
+        String payload = orderConfirmedPayload(orderId);
+
+        // act
+        kafkaTemplate.send("order-events", String.valueOf(orderId), payload);
+        kafkaTemplate.send("order-events", String.valueOf(orderId), payload);
+
+        // assert — 두 번째는 event_handled("order:777") 존재로 skip되어 합산되지 않는다
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            ProductMetricsModel m1 = productMetricsJpaRepository.findByProductId(1L).orElse(null);
+            assertThat(m1).isNotNull();
+            assertThat(m1.getSalesCount()).isEqualTo(2L);
+        });
+        // 잠시 더 기다려도 중복 반영이 없음을 확인 (두 번째 메시지 처리 시간 확보)
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ProductMetricsModel m1 = productMetricsJpaRepository.findByProductId(1L).orElseThrow();
+            assertThat(m1.getSalesCount()).isEqualTo(2L);
+        });
+        assertThat(eventHandledJpaRepository.count()).isEqualTo(1L);
+    }
+
+    private String orderConfirmedPayload(long orderId) {
+        return "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":" + orderId + ","
+            + "\"items\":[{\"productId\":1,\"quantity\":2},{\"productId\":2,\"quantity\":1}]}";
     }
 }

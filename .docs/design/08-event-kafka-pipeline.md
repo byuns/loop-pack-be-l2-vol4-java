@@ -171,29 +171,38 @@ ObjectMapper로 직렬화 (LikeFacade의 문자열 concat과 달리 items가 있
 
 **생성 파일**
 - `payment/application/SalesItem.java` — payload `items` 한 건 (`productId`, `quantity`) record
-- `payment/application/SalesAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + items별 `sales_count` 증감 (기존 `ProductMetricsRepository`·`EventHandledRepository`·`ProductMetricsModel.addSalesCount` 재사용)
+- `payment/application/SalesAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + items별 `sales_count` 원자 증가
 - `payment/interfaces/consumer/PaymentEventConsumer.java` — `@KafkaListener(topics="order-events", groupId="sales-aggregator")`, manual Ack
 
-**테스트 파일** (단위)
-- `SalesAggregatorServiceTest` — 신규 eventId 집계 / 멱등 skip / metrics 신규 생성 / 같은 productId 누적
-- `PaymentEventConsumerTest` — ORDER_CONFIRMED 파싱+호출+ack / 미지원 eventType skip+ack / 서비스 예외 시 ack 안 함
+**테스트 파일**
+- `SalesAggregatorServiceTest` (단위) — 신규 eventId 집계 호출 / 멱등 skip
+- `PaymentEventConsumerTest` (단위) — ORDER_CONFIRMED 파싱+호출+ack / 미지원 eventType skip+ack / 서비스 예외 시 ack 안 함
+- `SalesAggregatorConcurrencyIntegrationTest` (통합) — 같은 상품을 가진 주문 10건 동시 처리 → sales_count 합계 일치(lost update 없음) / 미존재 상품 UPSERT 생성
 
-**처리 흐름** (좋아요 Consumer와 동일)
+**처리 흐름**
 
 ```
 1. order-events에 ORDER_CONFIRMED 도착
-2. Consumer 수신 → eventId = "order-events:" + partition + ":" + offset
+2. Consumer 수신 → eventId = "order:" + orderId   (비즈니스 키)
 3. @Transactional 내부:
    a. event_handled에 eventId 존재? → 있으면 skip
    b. event_handled INSERT (멱등 기록)
-   c. items 순회: product_metrics.sales_count += quantity (없으면 새로 생성)
+   c. items 순회: incrementSalesCount(productId, quantity)  ← 원자 UPSERT
 4. ack.acknowledge() → offset commit
 5. 처리 실패 → ack 안 함 → 다음 poll에 재시도
 ```
 
 **Consumer group**: `sales-aggregator` (like-aggregator와 group·토픽 모두 분리)
 
-**알려진 한계**: 좋아요 Consumer와 동일 — Producer 재시작 후 중복(eventId가 Kafka 좌표 기반), DLT 미구현. 후속 보강 대상.
+#### 좋아요와 다르게 강화한 두 가지 (결제 고유 트레이드오프)
+
+좋아요 Consumer를 미러링했지만, 결제는 구조가 달라 두 지점을 보강했다.
+
+**1. 원자 UPSERT (동시성)** — `catalog-events`는 `productId`로 파티셔닝돼 같은 상품이 항상 같은 파티션에서 순차 처리되지만, `order-events`는 `orderId`로 파티셔닝되는데 집계 단위는 `productId`다. 한 주문이 여러 상품을 포함하고 같은 상품이 다른 주문(=다른 파티션·인스턴스)에서 동시에 팔릴 수 있어, `find → addSalesCount → save`(read-modify-write)는 인스턴스를 늘리는 순간 lost update가 난다(`@Version`도 없음). 그래서 `INSERT ... ON DUPLICATE KEY UPDATE sales_count = sales_count + :delta` 원자 UPSERT(`ProductMetricsRepository.incrementSalesCount`)로 교체했다. 멱등은 `event_handled`가 따로 책임지므로 역할이 분리된다. 회귀를 막기 위해 엔티티의 `addSalesCount`는 제거했다.
+
+**2. orderId 멱등 키** — `ORDER_CONFIRMED`는 주문당 평생 1회뿐이라 비즈니스 키 `"order:" + orderId`를 멱등 키로 쓴다. 좌표(`topic:partition:offset`) 기반과 달리 outbox 재발행·리밸런싱·리플레이로 Kafka 좌표가 바뀌어도 중복을 정확히 감지한다 → 좋아요 Consumer의 "Producer 재시작 후 중복" 한계를 결제는 구조적으로 회피. (좋아요는 한 상품에 LIKE_ADDED가 여러 번이라 비즈니스 키를 못 쓰고 좌표를 쓸 수밖에 없다.)
+
+**알려진 한계**: DLT 미구현(영구 실패 시 파티션 blocking → lag 누적). 취소/환불 시 `sales_count` 감소 경로 없음 → 현재 `sales_count`는 "확정 누적"이며 "순매출"이 아님. 후속 보강 대상.
 
 ---
 
@@ -203,7 +212,8 @@ ObjectMapper로 직렬화 (LikeFacade의 문자열 concat과 달리 items가 있
 
 **테스트 파일**: `apps/commerce-streamer/.../consumer/EventConsumerIntegrationTest.java`
 - `catalog-events`에 `LIKE_ADDED` 발행 → `product_metrics.like_count == 1`, `event_handled` 1건
-- `order-events`에 `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 1건
+- `order-events`에 `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 키가 `"order:{id}"` 1건
+- 같은 orderId의 `ORDER_CONFIRMED`를 2회 발행 → orderId 멱등 키로 `sales_count`는 1회만 반영
 - `OutboxPoller`와 동일하게 `kafkaTemplate.send(topic, key, payload문자열)`로 발행, Awaitility로 비동기 반영 대기
 - 테스트는 발행 후 Consumer가 붙으므로 `auto.offset.reset=earliest`로 override (운영 default는 `latest`)
 

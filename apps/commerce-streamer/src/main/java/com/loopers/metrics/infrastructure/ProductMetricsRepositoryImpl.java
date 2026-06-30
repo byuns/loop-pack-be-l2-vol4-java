@@ -22,4 +22,9 @@ public class ProductMetricsRepositoryImpl implements ProductMetricsRepository {
     public ProductMetricsModel save(ProductMetricsModel model) {
         return jpa.save(model);
     }
+
+    @Override
+    public void incrementSalesCount(Long productId, long delta) {
+        jpa.upsertSalesCount(productId, delta);
+    }
 }

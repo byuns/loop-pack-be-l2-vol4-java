@@ -36,9 +36,8 @@ public class ProductMetricsModel extends BaseEntity {
         }
     }
 
-    public void addSalesCount(long delta) {
-        this.salesCount += delta;
-    }
+    // sales_count는 동시성 안전을 위해 ProductMetricsRepository.incrementSalesCount(원자 UPSERT)로만 갱신한다.
+    // 엔티티 read-modify-write 메서드는 lost update 위험이 있어 의도적으로 두지 않는다.
 
     public Long getProductId() { return productId; }
     public long getLikeCount() { return likeCount; }

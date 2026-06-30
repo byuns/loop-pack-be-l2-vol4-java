@@ -56,7 +56,7 @@ class PaymentEventConsumerTest {
 
             // assert
             ArgumentCaptor<List<SalesItem>> captor = ArgumentCaptor.forClass(List.class);
-            verify(salesAggregatorService).handleOrderConfirmed(eq("order-events:0:10"), captor.capture());
+            verify(salesAggregatorService).handleOrderConfirmed(eq("order:123"), captor.capture());
             assertThat(captor.getValue()).containsExactly(
                 new SalesItem(1L, 2L),
                 new SalesItem(2L, 1L)

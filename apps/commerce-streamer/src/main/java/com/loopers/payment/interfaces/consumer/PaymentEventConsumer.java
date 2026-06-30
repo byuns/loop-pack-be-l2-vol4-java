@@ -28,13 +28,14 @@ public class PaymentEventConsumer {
     )
     public void onMessage(ConsumerRecord<String, String> record, Acknowledgment ack) {
         try {
-            // eventId = topic+partition+offset — Kafka가 unique 보장. Producer 재시작 시 중복은 향후 보강(outbox id를 header로 전달)
-            String eventId = record.topic() + ":" + record.partition() + ":" + record.offset();
             JsonNode payload = objectMapper.readTree(record.value());
             String eventType = payload.get("eventType").asText();
 
             switch (eventType) {
-                case "ORDER_CONFIRMED" -> salesAggregatorService.handleOrderConfirmed(eventId, parseItems(payload));
+                // 멱등 키는 비즈니스 키(orderId) 사용 — ORDER_CONFIRMED는 주문당 1회뿐이라
+                // outbox 재발행·리밸런싱·리플레이로 Kafka 좌표가 바뀌어도 중복을 정확히 감지한다.
+                case "ORDER_CONFIRMED" -> salesAggregatorService.handleOrderConfirmed(
+                    "order:" + payload.get("orderId").asLong(), parseItems(payload));
                 default -> log.warn("[PaymentEventConsumer] Unknown eventType={}, payload={}", eventType, record.value());
             }
             ack.acknowledge();
