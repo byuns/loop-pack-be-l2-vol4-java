@@ -120,8 +120,52 @@ class EventConsumerIntegrationTest {
         assertThat(eventHandledJpaRepository.count()).isEqualTo(1L);
     }
 
+    @DisplayName("catalog-events에 PRODUCT_VIEWED를 발행하면, view-aggregator Consumer가 product_metrics.view_count를 증가시킨다.")
+    @Test
+    void incrementsViewCount_whenProductViewedPublished() {
+        // arrange
+        long productId = 5L;
+        String payload = productViewedPayload(productId, 1000L);
+
+        // act
+        kafkaTemplate.send("catalog-events", String.valueOf(productId), payload);
+
+        // assert
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            ProductMetricsModel metrics = productMetricsJpaRepository.findByProductId(productId).orElse(null);
+            assertThat(metrics).isNotNull();
+            assertThat(metrics.getViewCount()).isEqualTo(1L);
+        });
+    }
+
+    @DisplayName("더 오래된 occurredAt의 PRODUCT_VIEWED가 뒤늦게 도착하면, occurredAt 가드로 view_count에 반영되지 않는다.")
+    @Test
+    void ignoresStaleView_whenOlderOccurredAtArrivesLater() {
+        // arrange — 먼저 최신(2000) 발행 후, 더 오래된(1000)을 발행 (서로 다른 offset = 다른 eventId)
+        long productId = 6L;
+
+        // act
+        kafkaTemplate.send("catalog-events", String.valueOf(productId), productViewedPayload(productId, 2000L));
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            ProductMetricsModel m = productMetricsJpaRepository.findByProductId(productId).orElse(null);
+            assertThat(m).isNotNull();
+            assertThat(m.getViewCount()).isEqualTo(1L);
+        });
+        kafkaTemplate.send("catalog-events", String.valueOf(productId), productViewedPayload(productId, 1000L));
+
+        // assert — stale 이벤트는 처리(event_handled 기록)되더라도 view_count는 그대로 1
+        await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            ProductMetricsModel m = productMetricsJpaRepository.findByProductId(productId).orElseThrow();
+            assertThat(m.getViewCount()).isEqualTo(1L);
+        });
+    }
+
     private String orderConfirmedPayload(long orderId) {
         return "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":" + orderId + ","
             + "\"items\":[{\"productId\":1,\"quantity\":2},{\"productId\":2,\"quantity\":1}]}";
+    }
+
+    private String productViewedPayload(long productId, long occurredAtMillis) {
+        return "{\"eventType\":\"PRODUCT_VIEWED\",\"productId\":" + productId + ",\"occurredAt\":" + occurredAtMillis + "}";
     }
 }

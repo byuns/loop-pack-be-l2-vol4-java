@@ -8,15 +8,18 @@ import com.loopers.product.domain.ProductRepository;
 import com.loopers.product.domain.ProductService;
 import com.loopers.product.domain.ProductSummaryModel;
 import com.loopers.product.domain.SortCondition;
+import com.loopers.product.domain.event.ProductViewedEvent;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.cache.annotation.Caching;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -34,6 +37,7 @@ public class ProductFacade {
     private final BrandService brandService;
     private final StockRepository stockRepository;
     private final ProductCacheService productCacheService;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public ProductInfo createProduct(String name, String description, Long price, Integer initialStock, Long brandId) {
@@ -51,6 +55,8 @@ public class ProductFacade {
         Integer availableStock = stockRepository.findByProductId(productId)
             .map(StockModel::availableStock)
             .orElse(0);
+        // 조회 행동 로깅 + 조회수 집계용 이벤트 (AFTER_COMMIT 리스너가 로깅/Kafka 발행)
+        eventPublisher.publishEvent(new ProductViewedEvent(productId, Instant.now()));
         return cached.withStock(availableStock);
     }
 
