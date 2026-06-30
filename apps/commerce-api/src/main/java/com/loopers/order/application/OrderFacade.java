@@ -14,7 +14,7 @@ import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
-import com.loopers.support.event.UserActionEvent;
+import com.loopers.order.domain.event.OrderCreatedEvent;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
@@ -91,7 +91,7 @@ public class OrderFacade {
         // [fix] save() 반환값을 사용해야 JPA가 부여한 ID가 반영됨
         OrderModel savedOrder = orderRepository.save(order);
         stocks.forEach(stockRepository::save);
-        eventPublisher.publishEvent(new UserActionEvent(userId, "ORDER", "order", savedOrder.getId()));
+        eventPublisher.publishEvent(new OrderCreatedEvent(savedOrder.getId(), userId));
         return OrderInfo.from(savedOrder);
     }
 
