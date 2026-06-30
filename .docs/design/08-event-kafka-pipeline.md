@@ -158,6 +158,34 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 ★ 표시가 테스트해볼 만한 옵션.
 
+### 옵션 테스트 결과
+
+#### acks (단일 broker 환경)
+
+**Test A — 정상 상태 지연 측정 (단일 broker 한계로 비교 불가)**
+
+`outbox INSERT → published_at` delta 측정했으나 Poller 5초 폴링 주기가 변동을 다 흡수해서 acks 차이가 묻힘. 단일 broker에선 acks=1과 acks=all도 사실상 동일 (기다릴 follower가 없음). **다중 broker 환경에서 재측정 예정.**
+
+**Test B — `acks=0` + `enable.idempotence=true` (의도적 모순 조합)**
+
+기대: Kafka 클라이언트가 ConfigException으로 시작 실패.
+실제: 에러 없이 시작. 실제 ProducerConfig 로그에 `enable.idempotence = false`로 찍힘 — 조용히 disable됨.
+
+원인: Kafka 3.0+에서 `enable.idempotence` 기본값이 `true`로 바뀌었다. YAML에 `true`를 명시해도 클라이언트는 "기본값 그대로 = 사용자가 명시적으로 override한 게 아님"으로 간주해서, `acks`와 충돌하면 throw 대신 silent disable로 처리한다.
+
+→ idempotence를 보장하려면 `acks=all`도 같이 명시. 한쪽만 바꾸면 의도와 다르게 동작할 수 있다.
+
+**Test C — Kafka down 시 acks=0 vs acks=all**
+
+기대: acks=0은 broker 응답 안 기다리니 발행 성공으로 처리될 줄 알았음.
+실제: 둘 다 `published_at=NULL`, send 실패.
+
+원인: `acks`는 TCP 연결이 잡힌 후 "broker 응답 기다림" 옵션이지 "TCP 없이도 OK"가 아니다. broker가 죽으면 TCP handshake부터 실패해서 `acks` 값과 무관하게 send() 자체가 깨진다.
+
+**부가 검증 — Outbox 복구 동작**
+
+Kafka down → outbox에 이벤트 쌓임 → Kafka 복구 → Poller가 자동 retry → 발행 성공. Outbox의 At Least Once 보장이 실제 동작으로 확인됨.
+
 ---
 
 ## 공통 — Kafka Broker 옵션
