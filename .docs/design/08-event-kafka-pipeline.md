@@ -272,9 +272,9 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 #### acks (단일 broker 환경)
 
-**Test A — 정상 상태 지연 측정 (단일 broker 한계로 비교 불가)**
+**Test A — 정상 상태 지연 측정 (단일 broker 한계로 비교 불가 → 다중 broker에서 재측정 완료)**
 
-`outbox INSERT → published_at` delta 측정했으나 Poller 5초 폴링 주기가 변동을 다 흡수해서 acks 차이가 묻힘. 단일 broker에선 acks=1과 acks=all도 사실상 동일 (기다릴 follower가 없음). **다중 broker 환경에서 재측정 예정.**
+`outbox INSERT → published_at` delta 측정했으나 Poller 5초 폴링 주기가 변동을 다 흡수해서 acks 차이가 묻힘. 단일 broker에선 acks=1과 acks=all도 사실상 동일 (기다릴 follower가 없음). → 3-broker 클러스터에서 재측정 완료 (아래 [다중 브로커 실험](#다중-브로커-실험-acks--mininsyncreplicas--outbox-복구) 참고).
 
 **Test B — `acks=0` + `enable.idempotence=true` (의도적 모순 조합)**
 
@@ -360,6 +360,49 @@ linger.ms=100이 **약 8배 느림**.
 | `message.max.bytes` | `1048576` | 브로커가 허용하는 최대 메시지 크기 (1MB) | |
 
 ★ 표시가 테스트해볼 만한 옵션.
+
+### 다중 브로커 실험 (acks · min.insync.replicas · outbox 복구)
+
+우리 outbox → Kafka 설계의 At-Least-Once 보장은 전부 `acks=all`에 걸려 있다. 그런데 단일 broker에선 `acks=all`이 사실상 `acks=1`이라(기다릴 follower 없음) **그 보장이 한 번도 실제로 검증된 적이 없었다.** 3-broker 클러스터로 재현.
+
+> **컨슈머는 다중 broker가 거의 불필요하다.** 컨슈머 동작(group/partition/offset)은 broker 1대 + 컨슈머 여러 개로 충분히 재현된다. 다중 broker는 **프로듀서/내구성 축**의 주제다.
+
+**토폴로지 — 전용 controller 1 + broker 3** (`docker-compose.multi-broker.yml`)
+
+combined(`broker,controller`) 모드로 3노드를 두면 broker 2대를 죽일 때 controller 쿼럼(3중 2)도 함께 깨져 ISR 변경이 메타데이터에 반영되지 않는다. 전용 controller를 분리하면 broker를 죽여도 쿼럼이 유지돼 `min.insync.replicas` 발동을 깔끔히 관찰할 수 있다. 핵심 설정: 내부 토픽 RF=3(`offsets.topic.replication.factor` 등), `default.replication.factor=3`, `min.insync.replicas=2`. 토픽은 `--replication-factor 3 --config min.insync.replicas=2`로 생성.
+
+> 실행 명령은 docker exec로 broker 컨테이너 내 CLI(`kafka-topics.sh`, `kafka-producer-perf-test.sh`)를 쓴다. Windows Git Bash는 `/opt/...` 경로를 변환하므로 **PowerShell**에서 실행.
+
+#### ① acks=1 vs acks=all 지연 (Test A 재측정)
+
+클러스터 정상(ISR=3)일 때 `kafka-producer-perf-test`로 2만 건 발행.
+
+| acks | 처리량 | 평균 지연 | p99 |
+|---|---|---|---|
+| `1` (리더만) | ~26,500 rec/s | ~219 ms | ~410 ms |
+| `all` (ISR=2 ack 대기) | ~18,900 rec/s | ~467 ms | ~747 ms |
+
+→ `acks=all`은 follower ack 대기로 **지연 약 2배, 처리량 약 30%↓**. 단일 broker에선 묻혔던 내구성의 비용이 드러난다.
+
+#### ② min.insync.replicas 발동
+
+리더(broker2)는 살려둔 채 follower만 하나씩 죽이며 `acks=all` 발행을 관찰.
+
+| 상태 | ISR | acks=all 발행 |
+|---|---|---|
+| 전체 정상 | 3 | 성공 |
+| broker 1대 down | 2 | **성공** (2 ≥ min 2) |
+| broker 2대 down | 1 | **거부** — `NotEnoughReplicasException`: "fewer in-sync replicas than required" (0 records sent) |
+
+→ 리더가 **살아있어도** ISR이 `min.insync.replicas` 미만이면 `acks=all` 쓰기를 거부한다. RF=3 / min.insync=2 = "1대 장애는 버티고, 2대 장애면 차라리 멈춘다"는 가용성↔내구성 균형점. `min.insync.replicas=1`이었다면 ISR=1에서도 썼겠지만 그 1벌이 죽으면 유실.
+
+#### ③ outbox 복구 안전망
+
+죽인 broker를 복구(`docker start`)하면 ISR이 회복되고, (Poller가 재시도할) `acks=all` 발행이 **다시 성공**한다.
+
+→ ISR 부족으로 발행이 거부되는 동안 이벤트는 `outbox_events`에 `published_at=NULL`로 남고, `OutboxPoller`가 5초마다 미발행분을 재시도한다. broker 복구 후 같은 재시도가 성공 → **유실 없음(At Least Once)**. "Kafka down → outbox 잔류 → 복구 → 자동 retry"를 다중 broker ISR 부족 상황으로 확장 검증.
+
+**교훈**: ①`acks=all`은 다중 broker에서만 진짜 의미를 갖는다. ②`min.insync.replicas`는 가용성↔내구성 다이얼이다. ③내구성은 공짜가 아니다(지연 ~2배) — 그래서 좋아요(유실 허용)는 느슨해도 되고 결제(유실 불가)는 이 비용을 받아들인다. ④outbox가 ISR 부족까지 흡수한다.
 
 ---
 
