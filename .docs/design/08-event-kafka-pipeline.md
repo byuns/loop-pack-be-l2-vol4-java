@@ -2,12 +2,65 @@
 
 ## 판단 기준
 
-> "이게 실패하면 사용자 요청 자체가 실패해야 하나?"
-> - Yes → 같은 TX
-> - No, 유실 허용 → `@TransactionalEventListener(AFTER_COMMIT)`
-> - No, 유실 불가 (다른 시스템) → Outbox + Kafka
+### 왜 분리하는가
 
-여기에 한 변형을 더한다: **유실 허용 + 다른 시스템 전파 필요** → Kafka 직접 발행(fire-and-forget). 조회수가 이 경우다 — 시스템 간 전파는 필요하지만 한두 건 유실돼도 무방하므로 Outbox(At-Least-Once)의 비용을 치르지 않는다.
+**트랜잭션 경계는 기술이 아니라 비즈니스 불변식이 결정한다.**
+
+트랜잭션을 어디서 끊을지는 "구현이 편한가"가 아니라 "이 두 가지가 항상 동시에 일관해야 하는 비즈니스 규칙이 있는가?"로 판단한다.
+
+```
+주문 생성 + 재고 예약
+→ "재고 없는데 주문이 생성되면 안 된다"는 불변식 존재 → 같은 TX
+
+주문 생성 + 행동 로깅
+→ "로깅 실패 시 주문도 실패해야 한다"는 불변식 없음 → 같은 TX일 이유 없음
+```
+
+**Event는 "과거 사실"이다, Command가 아니다.**
+
+```
+Command: UpdateLikeCount(productId, +1)  ← "집계 업데이트를 해줘"
+→ 발행자가 구독자에게 지시. 실패 시 보상 책임도 발행자에게 있음.
+
+Event: LikeAdded(productId)  ← "좋아요가 저장됐다"
+→ 이미 일어난 사실. 구독자는 그 사실을 바탕으로 각자 할 일만 함.
+→ 구독자가 몇 개인지, 뭘 하는지 발행자는 모른다.
+```
+
+Event로 설계하면 `LikeFacade`는 구독자(집계, 알림, 추천...)가 무엇을 하는지 모른 채 이벤트만 남긴다. 나중에 구독자가 늘어나도 발행자 코드는 바뀌지 않는다.
+
+---
+
+### 분리할 것인가
+
+**첫 번째 컷: "이게 실패하면 사용자 요청 자체가 실패해야 하나?"**
+
+- **Yes** → 이벤트 분리 X, 같은 TX 안에 둔다.
+- **No** → 분리 후보. 다음 질문으로 넘어간다.
+
+**분리하면 안 될 때**
+
+이벤트가 항상 답은 아니다.
+
+- **결과를 즉시 응답에 담아야 할 때** — 주문 생성 응답에 `finalAmount`를 바로 담아야 한다면 비동기 불가.
+- **이벤트 체인이 깊어질 때** — `주문 → [이벤트] → 결제 → [이벤트] → 재고 → [이벤트] → 배송`처럼 이어지면 어느 단계에서 실패했는지 추적하기 어렵고 보상 트랜잭션이 복잡해진다.
+- **구독자가 늘어날 여지 없는 단순 처리** — 이벤트로 분리하면 복잡도만 올라간다.
+
+---
+
+### 분리한다면 어떤 방식으로
+
+두 가지 질문으로 구현 방식을 결정한다.
+
+> 1. 유실돼도 괜찮나?
+> 2. 다른 시스템이 알아야 하나?
+
+```
+유실 허용? × 다른 시스템?
+├── Yes × No  → @TransactionalEventListener(AFTER_COMMIT)
+├── Yes × Yes → Kafka 직접 (fire-and-forget)
+└── No  × Yes → Outbox + Kafka
+```
 
 | 부수효과 | 요청 실패시켜야? | 유실 허용? | 다른 시스템? | 선택 |
 |---|---|---|---|---|
@@ -17,58 +70,40 @@
 | 행동 로깅 | No | Yes | No | AFTER_COMMIT |
 | **조회수 집계** | No | **Yes** | **Yes** | **Kafka 직접(fire-and-forget)** |
 
+"유실 허용"의 판단 기준: 단순히 "한 건쯤 빠져도 괜찮다"가 아니라 **"누락이 영구적으로 굳는가"** 를 본다. `likeCount`는 한 건 유실되면 DB에 틀린 숫자가 남는다 — 유실 불가. `조회수`는 통계라 한두 건 빠져도 전체 추세에 영향 없다 — 유실 허용.
+
+---
+
+### 분리 후 고려사항
+
+**Eventual Consistency — 읽기 시점 문제**
+
+이벤트로 분리하는 순간 "언제 어디서 읽느냐"가 설계 문제가 된다.
+
+```
+좋아요 누름 → 200 OK
+화면 갱신   → GET /products/{id} → likeCount = ?
+                                     아직 집계 안 됐을 수 있음
+```
+
+선택지:
+- API 응답에 `likeCount` 포함하지 않고 별도 집계 API 분리
+- 클라이언트가 좋아요 성공 시 로컬 상태로 +1 반영 (낙관적 UI)
+- 읽기는 DB 직접, 쓰기만 이벤트 경유 (CQRS 방향)
+
+이벤트 분리는 코드 분리로 끝나는 게 아니라, "언제 정확한 값을 보장하는가"까지 설계에 영향을 준다.
+
 ---
 
 ## 좋아요 (LIKE_ADDED / LIKE_CANCELLED)
 
-### ApplicationEvent — 완료
+좋아요 도메인이 이벤트 파이프라인의 첫 사례. 여기서 만든 Outbox + Consumer 패턴이 이후 결제, 조회수에 적용된다.
 
-#### 왜 분리했는가
+### ApplicationEvent → Outbox로 교체한 이유
 
-원래는 `LikeFacade.addLike()` 안에서 좋아요 저장과 likeCount 업데이트가 같은 TX로 묶여 있었다.
+처음엔 likeCount를 ApplicationEvent로 업데이트했다. 문제는 이벤트가 **메모리에만** 존재한다는 것 — TX 커밋 직후 서버가 죽으면 이벤트가 사라지고 likeCount 업데이트는 영영 실행되지 않는다.
 
-```
-[TX 시작]
-  likes INSERT
-  likeCount UPDATE  ← 같은 TX
-[TX 커밋]
-```
-
-원자적이라 데이터 정합성은 보장됐지만, 두 가지 문제가 있었다.
-
-첫째, likeCount 업데이트가 실패하면 좋아요 저장 자체도 롤백됐다. 집계 실패가 사용자의 좋아요 행위 실패로 이어지는 것은 과도한 결합이다.
-
-둘째, 같은 TX 안에 두 책임이 묶여 있으면 분리하기 어렵다. 나중에 likeCount를 Redis나 외부 집계 서버로 옮기고 싶어도, 좋아요 저장 로직과 강하게 결합되어 있어서 한쪽만 바꾸기가 힘들다.
-
-"좋아요 저장"과 "집계"는 중요도가 다르고, 변경 이유도 다르다. 집계가 틀려도 좋아요는 성공해야 한다. 그래서 TX를 분리했다.
-
-```
-[TX 시작]              [별도 TX, 별도 스레드]
-  likes INSERT    →    likeCount UPDATE
-[TX 커밋]
-  ↓ AFTER_COMMIT
-  LikeAddedEvent 발행
-```
-
-이로써 집계가 실패해도 좋아요는 유지된다. 대신 likeCount 업데이트는 **eventual consistency**로 처리된다.
-
-#### ApplicationEvent의 한계
-
-이벤트가 메모리 위에만 존재한다. TX 커밋 직후 서버가 죽으면 이벤트는 사라지고 likeCount 업데이트는 영영 실행되지 않는다.
-
-#### @Async가 필요한 이유
-
-`@TransactionalEventListener(AFTER_COMMIT)` 단독으로는 커밋 이후 원본 커넥션이 아직 반환되지 않은 상태에서 `@Transactional(REQUIRES_NEW)`가 새 커넥션을 요청 → 동시 요청 시 커넥션 풀 고갈.
-
-→ `@Async` 추가로 별도 스레드에서 실행. 원본 커넥션 반환 후 새 커넥션 획득하므로 풀 고갈 없음.
-
----
-
-### Outbox + Kafka Producer — 완료
-
-ApplicationEvent 방식의 유실 문제를 해결하기 위해 Outbox로 교체했다.
-
-좋아요 저장과 같은 TX 안에서 `outbox_events`에 INSERT → TX가 커밋되면 이벤트도 DB에 보장됨 → Poller가 Kafka로 발행.
+→ 좋아요 저장과 **같은 TX 안에서** `outbox_events`에 INSERT하는 방식으로 교체. TX가 커밋되면 이벤트도 DB에 보장된다. Poller가 5초마다 미발행 이벤트를 Kafka로 전달한다.
 
 | | ApplicationEvent | Outbox + Kafka |
 |---|---|---|
@@ -76,88 +111,57 @@ ApplicationEvent 방식의 유실 문제를 해결하기 위해 Outbox로 교체
 | likeCount 반영 속도 | 커밋 직후 즉시 | Poller 주기만큼 지연 |
 | 구현 복잡도 | 낮음 | 높음 |
 
-**생성 파일**
-- `support/outbox/OutboxEvent.java`
-- `support/outbox/OutboxRepository.java`, `OutboxRepositoryImpl.java`, `OutboxJpaRepository.java`
-- `support/outbox/OutboxPoller.java` — 5초마다 미발행 이벤트 Kafka로 발행
-
-**수정 파일**
-- `LikeFacade.addLike/cancelLike` — `eventPublisher` 제거 → `outboxRepository.save()` 로 교체
-- `LikeEventListener.java` — 삭제
-- `build.gradle.kts` — `:modules:kafka` 의존성 추가
-- `application.yml` — Kafka producer 설정 (`acks=all`, `enable-idempotence=true`)
-- `AsyncConfig.java` — `@EnableScheduling` 추가
-
 **토픽:** `catalog-events` / Partition Key: `productId`
 
----
+### @Async가 필요한 이유
 
-### Consumer — 완료
+AFTER_COMMIT 리스너에서 DB를 써야 할 때(REQUIRES_NEW) 새 커넥션이 필요하다. 그런데 AFTER_COMMIT이 실행되는 시점에 원본 커넥션이 아직 반환되지 않은 상태다.
 
-`commerce-streamer` 모듈에서 `catalog-events` 구독, `product_metrics.like_count` upsert.
+동시 요청이 많으면 "새 커넥션을 기다리는 스레드들"이 쌓이면서 커넥션 풀이 바닥난다.
 
-**생성 파일**
-- `metrics/domain/ProductMetricsModel.java` — `product_metrics` 엔티티 (`productId` unique, `likeCount`, `salesCount`)
-- `metrics/domain/ProductMetricsRepository.java`, `infrastructure/ProductMetricsJpaRepository.java`, `infrastructure/ProductMetricsRepositoryImpl.java`
-- `eventhandled/domain/EventHandledModel.java` — `event_id` PK, `handled_at`
-- `eventhandled/domain/EventHandledRepository.java`, `infrastructure/EventHandledJpaRepository.java`, `infrastructure/EventHandledRepositoryImpl.java`
-- `like/application/LikeAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + like_count 증감
-- `like/interfaces/consumer/LikeEventConsumer.java` — `@KafkaListener(topics="catalog-events", groupId="like-aggregator")`
+`@Async`를 붙이면 별도 스레드에서 실행되어, 원본 스레드가 커넥션을 먼저 반환하고 그 뒤에 새 커넥션을 가져오게 된다.
 
-**수정 파일**
-- `modules/kafka/src/main/resources/kafka.yml`
-  - 오타 수정: `value-serializer` → `value-deserializer` (Consumer엔 serializer가 없음. 그동안 무시되고 default 적용되던 버그)
-  - local/test 프로필 bootstrap-servers: `localhost:19092` → `localhost:9092` (docker-compose 환경에 맞춤)
-- `apps/commerce-streamer/src/main/resources/application.yml`
-  - `server.port: 8085` (commerce-api의 8080·management 8081과 충돌 회피)
-  - `application.name: commerce-api → commerce-streamer` (copy-paste 흔적 정리)
-  - `monitoring.yml` import 제거 — 이걸 import하면 actuator port 8081로 강제되어 commerce-api의 management와 충돌
+> 현재 AFTER_COMMIT 리스너들은 로깅만 해서 @Async 없이도 괜찮다. 나중에 리스너에 DB 쓰기를 추가하면 이 이슈가 그대로 발생한다.
 
-**처리 흐름**
+### Consumer 처리 흐름
 
 ```
 1. catalog-events에 LIKE_ADDED 도착
 2. Consumer 수신 → eventId = "catalog-events:" + partition + ":" + offset
 3. @Transactional 내부:
-   a. event_handled에 eventId 존재? → 있으면 skip + ack
-   b. event_handled INSERT (멱등 기록)
+   a. event_handled에 eventId 이미 있으면 skip + ack (멱등)
+   b. event_handled INSERT
    c. product_metrics.like_count +1 (없으면 새로 생성)
 4. ack.acknowledge() → offset commit
-5. 처리 실패 → ack 안 함 → 다음 poll에 재시도 (영속 실패 시 lag 누적)
+5. 처리 실패 → ack 안 함 → 다음 poll에서 재시도
 ```
 
-**Consumer group**: `like-aggregator`
-- catalog-events 3 partition 모두 단일 consumer가 처리 (현재 인스턴스 1개)
-- 향후 부하 증가 시 인스턴스 수 늘려서 partition 분담 가능 (최대 3개)
-- 결제 집계용 sales-aggregator group은 같은 토픽이 아니라 order-events 구독이라 무관
+**Consumer group:** `like-aggregator` (인스턴스를 늘리면 partition 분담, 최대 3개까지)
 
-**알려진 한계 (후속 보강)**
+**알려진 한계**
 
-1. **Producer 재시작 후 중복**: outbox poller가 broker write 성공 → published_at 갱신 전 크래시 → 재시작 후 같은 outbox 이벤트를 새 (partition, offset)으로 재발행. 현재 eventId가 Kafka 좌표 기반이라 중복 감지 불가. **해결**: OutboxPoller가 outbox.id를 Kafka header로 함께 전달, Consumer가 그걸 eventId로 사용.
-2. **DLT 미구현**: 영속 실패 시 lag 무한 누적. production 가기 전 도입 필요.
+- **중복 발행 감지 한계**: Poller가 발행 성공 후 `published_at` 갱신 전 크래시하면, 재시작 시 같은 이벤트가 새 (partition, offset)으로 재발행된다. eventId가 좌표 기반이라 이 경우 중복 감지 불가. 해결책: outbox.id를 Kafka header로 넘겨 Consumer가 eventId로 사용.
+- **DLT 미구현**: 영속 실패 시 lag 누적. production 투입 전 필요.
 
 ---
 
 ## 결제 (ORDER_CONFIRMED)
 
-### ApplicationEvent — 완료
+### ApplicationEvent
 
-`PaymentFacade.applyPgResult()` 에서 결제 결과에 따라 이벤트 발행.
+`PaymentFacade.applyPgResult()`에서 결제 결과에 따라 이벤트 발행.
 
-- SUCCESS → `PaymentConfirmedEvent(orderId, finalAmount)` — 알림 목적
-- FAIL → `PaymentFailedEvent(orderId)`
+- SUCCESS → `PaymentConfirmedEvent(orderId, finalAmount)` — 알림용 (AFTER_COMMIT)
+- FAIL → `PaymentFailedEvent(orderId)` — 알림용 (AFTER_COMMIT)
 
----
+알림(AFTER_COMMIT)과 집계(Outbox INSERT)가 같은 SUCCESS 분기에 공존한다 — 목적이 달라 둘 다 필요하다.
 
-### Outbox + Kafka Producer — 완료
-
-`PaymentFacade.applyPgResult()` SUCCESS 분기에 `order-events` outbox INSERT 추가.
-
-`PaymentConfirmedEvent`(알림용)와 Outbox INSERT(집계용)는 목적이 달라 공존한다.
+### Outbox + Kafka Producer
 
 **토픽:** `order-events` / Partition Key: `orderId`
 
-**payload 구조** (self-contained — Consumer가 추가 API 호출 없이 sales_count upsert 가능):
+payload에 items 배열을 포함해 Consumer가 추가 API 호출 없이 집계할 수 있게 했다(self-contained):
+
 ```json
 {
   "eventType": "ORDER_CONFIRMED",
@@ -169,117 +173,100 @@ ApplicationEvent 방식의 유실 문제를 해결하기 위해 Outbox로 교체
 }
 ```
 
-ObjectMapper로 직렬화 (LikeFacade의 문자열 concat과 달리 items가 있어 escape 문제 방지).
+### Consumer
 
----
-
-### Consumer — 완료
-
-좋아요 Consumer와 같은 패턴으로 `commerce-streamer` 모듈에 구현. `commerce-collector`는 별도 모듈로 분리하지 않고, 재사용 대상(`ProductMetricsModel`, `event_handled`)과 좋아요 Consumer가 이미 있는 `commerce-streamer`에 함께 두었다.
-
-`order-events` 구독 → payload의 `items`를 순회하며 `product_metrics.sales_count`를 `quantity`만큼 upsert. payload가 self-contained라 추가 API 호출 없음.
-
-**생성 파일**
-- `payment/application/SalesItem.java` — payload `items` 한 건 (`productId`, `quantity`) record
-- `payment/application/SalesAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + items별 `sales_count` 원자 증가
-- `payment/interfaces/consumer/PaymentEventConsumer.java` — `@KafkaListener(topics="order-events", groupId="sales-aggregator")`, manual Ack
-
-**테스트 파일**
-- `SalesAggregatorServiceTest` (단위) — 신규 eventId 집계 호출 / 멱등 skip
-- `PaymentEventConsumerTest` (단위) — ORDER_CONFIRMED 파싱+호출+ack / 미지원 eventType skip+ack / 서비스 예외 시 ack 안 함
-- `SalesAggregatorConcurrencyIntegrationTest` (통합) — 같은 상품을 가진 주문 10건 동시 처리 → sales_count 합계 일치(lost update 없음) / 미존재 상품 UPSERT 생성
+`order-events` 구독 → items를 순회하며 `product_metrics.sales_count`를 quantity만큼 증가.
 
 **처리 흐름**
 
 ```
 1. order-events에 ORDER_CONFIRMED 도착
-2. Consumer 수신 → eventId = "order:" + orderId   (비즈니스 키)
+2. Consumer 수신 → eventId = "order:" + orderId  (비즈니스 키)
 3. @Transactional 내부:
-   a. event_handled에 eventId 존재? → 있으면 skip
-   b. event_handled INSERT (멱등 기록)
-   c. items 순회: incrementSalesCount(productId, quantity)  ← 원자 UPSERT
+   a. event_handled에 eventId 이미 있으면 skip (멱등)
+   b. event_handled INSERT
+   c. items 순회: incrementSalesCount(productId, quantity) ← 원자 UPSERT
 4. ack.acknowledge() → offset commit
-5. 처리 실패 → ack 안 함 → 다음 poll에 재시도
+5. 처리 실패 → ack 안 함 → 다음 poll에서 재시도
 ```
 
-**Consumer group**: `sales-aggregator` (like-aggregator와 group·토픽 모두 분리)
+**Consumer group:** `sales-aggregator`
 
-#### 좋아요와 다르게 강화한 두 가지 (결제 고유 트레이드오프)
+#### 좋아요와 다른 두 가지
 
-좋아요 Consumer를 미러링했지만, 결제는 구조가 달라 두 지점을 보강했다.
+**1. 원자 UPSERT — 동시성 문제 해결**
 
-**1. 원자 UPSERT (동시성)** — `catalog-events`는 `productId`로 파티셔닝돼 같은 상품이 항상 같은 파티션에서 순차 처리되지만, `order-events`는 `orderId`로 파티셔닝되는데 집계 단위는 `productId`다. 한 주문이 여러 상품을 포함하고 같은 상품이 다른 주문(=다른 파티션·인스턴스)에서 동시에 팔릴 수 있어, `find → addSalesCount → save`(read-modify-write)는 인스턴스를 늘리는 순간 lost update가 난다(`@Version`도 없음). 그래서 `INSERT ... ON DUPLICATE KEY UPDATE sales_count = sales_count + :delta` 원자 UPSERT(`ProductMetricsRepository.incrementSalesCount`)로 교체했다. 멱등은 `event_handled`가 따로 책임지므로 역할이 분리된다. 회귀를 막기 위해 엔티티의 `addSalesCount`는 제거했다.
+좋아요는 `productId`로 파티셔닝되어 같은 상품 이벤트가 항상 같은 파티션에서 순서대로 처리된다. 동시에 같은 행을 건드리는 Consumer가 없다.
 
-**2. orderId 멱등 키** — `ORDER_CONFIRMED`는 주문당 평생 1회뿐이라 비즈니스 키 `"order:" + orderId`를 멱등 키로 쓴다. 좌표(`topic:partition:offset`) 기반과 달리 outbox 재발행·리밸런싱·리플레이로 Kafka 좌표가 바뀌어도 중복을 정확히 감지한다 → 좋아요 Consumer의 "Producer 재시작 후 중복" 한계를 결제는 구조적으로 회피. (좋아요는 한 상품에 LIKE_ADDED가 여러 번이라 비즈니스 키를 못 쓰고 좌표를 쓸 수밖에 없다.)
+결제는 `orderId`로 파티셔닝되는데 집계 단위는 `productId`다. 상품 A가 들어간 주문 10개가 동시에 처리되면 Consumer 10개가 `product_metrics`의 같은 행을 동시에 업데이트한다.
 
-**알려진 한계**: DLT 미구현(영구 실패 시 파티션 blocking → lag 누적). 취소/환불 시 `sales_count` 감소 경로 없음 → 현재 `sales_count`는 "확정 누적"이며 "순매출"이 아님. 후속 보강 대상.
+이때 `find → count + delta → save` 패턴은 lost update가 발생한다. 두 Consumer가 동시에 `sales_count = 5`를 읽고 각각 +2, +3을 쓰면 마지막에 쓴 값으로 덮어써진다. 실제로는 10이어야 하는데.
 
----
+→ `INSERT ... ON DUPLICATE KEY UPDATE sales_count = sales_count + :delta` 원자 UPSERT로 교체. DB가 읽기-수정-쓰기를 한 번의 쿼리로 처리해 동시 업데이트에도 안전하다.
 
-### Consumer 통합 검증 (Testcontainers) — 완료
+**2. 비즈니스 키 멱등**
 
-좋아요·결제 Consumer를 실제 Kafka(`apache/kafka:3.8.1` Testcontainer) + MySQL로 end-to-end 검증.
+좋아요는 같은 상품에 LIKE_ADDED가 여러 번 올 수 있어서 Kafka 좌표(`topic:partition:offset`)를 멱등 키로 쓴다.
 
-**테스트 파일**: `apps/commerce-streamer/.../consumer/EventConsumerIntegrationTest.java`
-- `catalog-events`에 `LIKE_ADDED` 발행 → `product_metrics.like_count == 1`, `event_handled` 1건
-- `order-events`에 `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 키가 `"order:{id}"` 1건
-- 같은 orderId의 `ORDER_CONFIRMED`를 2회 발행 → orderId 멱등 키로 `sales_count`는 1회만 반영
-- `OutboxPoller`와 동일하게 `kafkaTemplate.send(topic, key, payload문자열)`로 발행, Awaitility로 비동기 반영 대기
-- 테스트는 발행 후 Consumer가 붙으므로 `auto.offset.reset=earliest`로 override (운영 default는 `latest`)
+결제는 주문당 ORDER_CONFIRMED가 평생 1번뿐이라 `"order:" + orderId`를 멱등 키로 쓴다. Outbox 재발행이나 리밸런싱으로 Kafka 좌표가 바뀌어도 orderId가 같으면 중복을 정확히 잡는다. 좋아요의 "Producer 재시작 후 중복" 한계를 구조적으로 피한 것.
 
-**검증으로 발견·수정한 버그 — 이중 직렬화 (둘 다 깨져 있었음)**
+**알려진 한계**
 
-Producer의 `value-serializer`가 `JsonSerializer`였는데, Outbox `payload`는 이미 `ObjectMapper`로 직렬화된 **JSON 문자열**이다. JsonSerializer가 이 문자열을 한 번 더 직렬화 → `"{\"eventType\":...}"`처럼 바깥에 따옴표가 덧씌워진 채 발행됨.
+- DLT 미구현
+- 취소/환불 시 `sales_count` 감소 경로 없음 → 현재는 "확정 누적"이며 "순매출"이 아님
 
-Consumer는 `StringDeserializer`로 받아 `objectMapper.readTree(value)` 했으나, 값이 JSON 객체가 아니라 **JSON 문자열 리터럴**이라 `TextNode`로 파싱됨 → `.get("eventType")`이 `null` → NPE → ack 안 됨 → lag 무한 누적.
+### 통합 검증 (Testcontainers)
 
-→ **수정**: `kafka.yml` producer `value-serializer`를 `JsonSerializer` → `StringSerializer`로 변경. payload가 이미 JSON 문자열이므로 Consumer(`StringDeserializer`)와 String↔String 대칭이 맞다. 유일한 실제 Producer는 `OutboxPoller`(문자열 발행)라 부작용 없음.
+`EventConsumerIntegrationTest.java`에서 실제 Kafka(`apache/kafka:3.8.1`) + MySQL로 검증:
 
-> 교훈: Producer/Consumer 직렬화 짝은 항상 같이 맞춰야 한다. payload를 애플리케이션에서 직접 문자열로 만들면 serializer는 String 계열이어야 하고, 객체를 그대로 넘기면 Json 계열이어야 한다. 섞이면 조용히 이중 인코딩된다.
+- `LIKE_ADDED` 발행 → `like_count == 1`, `event_handled` 1건
+- `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 키 `"order:{id}"` 1건
+- 같은 orderId `ORDER_CONFIRMED` 2회 발행 → `sales_count` 1회만 반영 (멱등 확인)
+
+**검증 중 발견한 버그 — 이중 직렬화**
+
+Producer `value-serializer`가 `JsonSerializer`였는데, Outbox payload는 이미 ObjectMapper로 직렬화된 **JSON 문자열**이다. JsonSerializer가 이 문자열을 한 번 더 직렬화해 바깥에 따옴표가 덧씌워진 채 발행됐다.
+
+Consumer가 `StringDeserializer`로 받아 파싱하면 JSON 객체가 아니라 **문자열 리터럴**로 읽혀 `.get("eventType")`이 null → NPE → ack 안 됨 → lag 무한 누적.
+
+→ `kafka.yml` producer를 `JsonSerializer` → `StringSerializer`로 수정.
+
+> Producer와 Consumer의 직렬화 방식은 항상 짝을 맞춰야 한다. payload를 코드에서 직접 문자열로 만들면 String 계열, 객체를 그대로 넘기면 Json 계열이어야 한다. 섞이면 이중 인코딩이 조용히 발생한다.
 
 ---
 
 ## 조회수 (PRODUCT_VIEWED)
 
-상품 조회는 **유실 허용 + 시스템 전파 필요**라, 좋아요·결제와 달리 Outbox를 거치지 않고 Kafka로 **직접 발행(fire-and-forget)** 한다. 같은 이벤트가 두 가지 목적에 쓰인다: ① 서버 레벨 행동 로깅(인프로세스), ② 조회수 집계(streamer).
+상품 조회는 **유실 허용 + 다른 시스템 전파**라 Outbox 없이 Kafka로 직접 발행한다. 같은 이벤트를 두 리스너가 다른 목적으로 구독한다.
 
-### ApplicationEvent + Kafka 직접 발행 — 완료
+### ApplicationEvent + Kafka 직접 발행
 
-`ProductFacade.getProduct`(readOnly TX)에서 `ProductViewedEvent(productId, occurredAt)`를 발행. 두 리스너가 `AFTER_COMMIT`으로 구독한다.
+`ProductFacade.getProduct`(readOnly TX)에서 `ProductViewedEvent(productId, occurredAt)` 발행.
 
-- `UserActionLogListener` — 행동 로깅(인프로세스). `OrderCreatedEvent`도 같이 받아 한곳에서 통합 로깅.
-- `ProductViewEventPublisher` — `@Async` + `AFTER_COMMIT`으로 `catalog-events`에 직접 send. 조회는 유실 허용이라 발행 실패해도 그냥 흘려보낸다(`.get()` 안 함, Outbox 미경유).
+- `UserActionLogListener` — 행동 로깅. `OrderCreatedEvent`도 함께 받아 한곳에서 통합 로깅.
+- `ProductViewEventPublisher` — `@Async` + AFTER_COMMIT으로 `catalog-events`에 직접 send. 발행 실패해도 흘려보낸다(`.get()` 안 함).
 
-> 왜 readOnly TX 안에서 발행하나: TX 밖(컨트롤러)에서 publish하면 `@TransactionalEventListener`가 발화하지 않는다. readOnly TX도 커밋되므로 AFTER_COMMIT이 정상 동작한다.
+> readOnly TX 안에서 이벤트를 발행하는 이유: TX 밖에서 publish하면 `@TransactionalEventListener`가 발화하지 않는다. readOnly TX도 커밋되므로 AFTER_COMMIT이 정상 동작한다.
 
 **토픽:** `catalog-events` / Partition Key: `productId` (좋아요와 동일 토픽·키)
 
-**payload:** `{eventType:"PRODUCT_VIEWED", productId, occurredAt}` (occurredAt = epoch millis)
+### Consumer
 
-### Consumer — 완료
+`view-aggregator` 그룹으로 `catalog-events` 구독. `PRODUCT_VIEWED`만 처리하고 나머지(LIKE_*)는 흘려보낸다. `like-aggregator`와 다른 그룹이라 같은 토픽에서 각자 독립적으로 메시지를 받는다(fan-out).
 
-`commerce-streamer`에서 `catalog-events`를 **`view-aggregator` 그룹**으로 구독(like-aggregator와 다른 그룹 → fan-out). `PRODUCT_VIEWED`만 처리하고 나머지(LIKE_*)는 흘려보낸다 — **Consumer Group 분리로 관심사별 처리**(nice-to-have).
+### occurredAt 가드 — 최신 이벤트만 반영
 
-**생성 파일**
-- `view/application/ViewAggregatorService.java` — `@Transactional` 멱등 체크 + `applyView`
-- `view/interfaces/consumer/ViewEventConsumer.java` — `@KafkaListener(topics="catalog-events", groupId="view-aggregator")`
+`applyView`는 이전에 반영한 occurredAt보다 오래된 이벤트를 무시한다.
 
-**수정 파일**
-- `metrics/domain/ProductMetricsModel.java` — `view_count` + `last_view_event_at` + `applyView(occurredAt)` (occurredAt 가드)
-- `metrics/infrastructure/ProductMetricsJpaRepository.java` — sales 원자 UPSERT의 INSERT 절에 `view_count=0` 추가 (신규 NOT NULL 컬럼 누락으로 sales INSERT가 깨지던 것 수정)
-
-### occurredAt 가드 — "version/updated_at 기준 최신만 반영"
-
-요구사항의 "최신 이벤트만 반영"을 occurredAt(epoch millis)로 직역 구현. `applyView`는 **이전에 반영한 occurredAt보다 더 오래된(stale) 이벤트는 무시**한다.
-
-```
+```java
 if (lastViewEventAt != null && occurredAt < lastViewEventAt) return;  // stale → skip
-viewCount++; lastViewEventAt = occurredAt;
+viewCount++;
+lastViewEventAt = occurredAt;
 ```
 
-**카운터에 이 가드가 안전한 이유**: 단순 증감 카운터에 "최신만 반영"을 걸면 정상 증가를 떨굴 위험이 있다. 하지만 `catalog-events`는 `productId` 키라 **같은 상품의 이벤트가 단일 파티션에서 순서대로** 처리된다 → occurredAt이 상품별로 단조 증가 → 가드는 재발행 등 **진짜 stale 이벤트만** 떨구고 정상 조회는 누락하지 않는다. (같은 timestamp의 서로 다른 이벤트는 `event_handled` 멱등이 중복을 막으므로 `<` 비교로 충분.)
+이 가드가 안전한 이유: `catalog-events`가 `productId` 키로 파티셔닝되어 **같은 상품 이벤트가 단일 파티션에서 순서대로** 처리된다. 정상 조회 이벤트는 항상 이전 것보다 occurredAt이 크다. 가드는 Outbox 재발행 같은 진짜 stale 이벤트만 떨군다.
 
-> 반대로 판매량(`order-events`)은 `orderId` 키라 같은 상품이 여러 파티션에 흩어져 순서 보장이 안 된다 → occurredAt 가드 대신 `orderId` 비즈니스 키 멱등을 쓴다. **파티션 키 설계가 멱등/순서 전략을 결정한다.**
+반대로 판매량(`order-events`)은 `orderId` 키라 같은 상품이 여러 파티션에 흩어져 순서가 보장되지 않는다 → occurredAt 가드 대신 orderId 비즈니스 키 멱등을 쓴다. **파티션 키 설계가 멱등/순서 전략을 결정한다.**
 
 ---
 
@@ -307,265 +294,151 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 ## 공통 — Kafka Producer 옵션
 
-| 옵션 | 기본값 | 현재 설정 | 역할 | 테스트 |
-|---|---|---|---|---|
-| `acks` | `1` | `all` | 브로커가 '성공'으로 응답하는 기준. `0`=응답 대기 없이 즉시 OK(유실 위험), `1`=리더 저장 시 OK, `all`=ISR 전원 저장 시 OK(가장 안전). 단일 broker에선 `all`과 `1` 실질 동일 | ★ |
-| `enable.idempotence` | `false` | `true` | 재시도 시 Producer가 같은 메시지를 broker에 두 번 쓰는 것 방지. Kafka가 sequence number로 중복 감지. `acks=all` 없이 단독 설정하면 조용히 `false`로 강등 | ★ |
-| `retries` | `2147483647` | 기본값 | 발행 실패 시 재시도 횟수. 기본값이 사실상 무한이라 `delivery.timeout.ms`(120초)가 실질 한도 | ★ |
-| `retry.backoff.ms` | `100` | 기본값 | 재시도 간격 (ms) | |
-| `linger.ms` | `0` | 기본값 | 같은 파티션 메시지를 N ms 모아서 한 번에 전송(배치). `0`=즉시 전송. `batch.size`가 먼저 차면 즉시 flush | ★ |
-| `batch.size` | `16384` | 기본값 | `linger.ms` 대기 중 파티션별 배치가 이 크기(bytes)를 초과하면 즉시 flush. `linger.ms`와 짝: 크기 OR 시간 중 먼저 되면 전송 | |
-| `compression.type` | `none` | 기본값 | 메시지 압축 방식. CPU 사용↑, 네트워크 사용↓. 처리량 높을수록 압축 효과 큼 | |
-| `max.in.flight.requests.per.connection` | `5` | 기본값 | 브로커 응답 대기 중 동시에 보낼 수 있는 요청 수. `idempotence=false`이면 재시도 시 순서 역전 가능 → 순서 중요하면 `1`. `idempotence=true`이면 Kafka가 내부 재정렬하므로 `5`도 안전 | |
-| `request.timeout.ms` | `30000` | 기본값 | 단일 요청에 대한 broker 응답 대기 타임아웃 | |
-| `delivery.timeout.ms` | `120000` | 기본값 | 재시도 포함 최종 발행 타임아웃. 이 시간 안에 성공 못 하면 발행 실패 처리. `retries`의 실질 상한 | |
+| 옵션 | 현재 설정 | 역할 |
+|---|---|---|
+| `acks` | `all` | 브로커가 '성공'으로 응답하는 기준. `1`=리더 저장 시 OK, `all`=ISR 전원 저장 시 OK |
+| `enable.idempotence` | `true` | 재시도 시 중복 발행 방지. Kafka가 sequence number로 중복 감지 |
+| `linger.ms` | `0` (기본) | 메시지를 N ms 모아서 배치 전송. `0`=즉시 전송 |
+| `delivery.timeout.ms` | `120000` (기본) | 재시도 포함 최종 발행 타임아웃. retries의 실질 상한 |
 
-★ 표시가 테스트해볼 만한 옵션.
+> **ISR(In-Sync Replicas)**: 리더와 동기화된 follower 집합. `acks=all`은 이 집합 전원이 저장을 확인해야 성공. 단일 broker에서는 `acks=1`과 실질 동일하다.
 
-> **ISR(In-Sync Replicas)**: 리더와 동기화 상태가 최신인 follower 집합. `acks=all`은 이 집합 전원이 저장을 확인해야 성공. broker가 죽거나 느려지면 ISR에서 제외되어 집합이 줄어든다.
->
-> **세 옵션 묶음** — `acks=all` + `enable.idempotence=true` + `max.in.flight=5`는 Kafka 공식 권장 "순서 보장 + 중복 방지" 세트다. 하나만 바꿔도 보장이 깨진다: `acks`를 낮추면 `idempotence`가 조용히 꺼지고, `idempotence=true`이면 `max.in.flight=1`로 낮출 필요가 없다.
+> **세 옵션 묶음** — `acks=all` + `enable.idempotence=true` + `max.in.flight=5`는 Kafka 권장 세트. 하나만 바꾸면 보장이 깨진다. `acks`를 낮추면 `idempotence`가 조용히 꺼진다.
 
 ### 옵션 테스트 결과
 
-#### acks (단일 broker 환경)
+**acks=0 + idempotence=true (의도적 모순)**
 
-**Test A — 정상 상태 지연 측정 (단일 broker 한계로 비교 불가 → 다중 broker에서 재측정 완료)**
+- 기대: ConfigException으로 시작 실패
+- 실제: 에러 없이 시작, ProducerConfig 로그에 `enable.idempotence = false`로 찍힘
 
-`outbox INSERT → published_at` delta 측정했으나 Poller 5초 폴링 주기가 변동을 다 흡수해서 acks 차이가 묻힘. 단일 broker에선 acks=1과 acks=all도 사실상 동일 (기다릴 follower가 없음). → 3-broker 클러스터에서 재측정 완료 (아래 [다중 브로커 실험](#다중-브로커-실험-acks--mininsyncreplicas--outbox-복구) 참고).
+Kafka 3.0+에서 `acks`와 충돌하면 throw 대신 silent disable로 처리한다. `acks=all`도 함께 명시해야 보장된다.
 
-**Test B — `acks=0` + `enable.idempotence=true` (의도적 모순 조합)**
+**Kafka down 시 acks=0 vs acks=all**
 
-기대: Kafka 클라이언트가 ConfigException으로 시작 실패.
-실제: 에러 없이 시작. 실제 ProducerConfig 로그에 `enable.idempotence = false`로 찍힘 — 조용히 disable됨.
+- 기대: acks=0은 응답을 안 기다리니 발행 성공으로 처리될 것
+- 실제: 둘 다 `published_at=NULL`, send 실패
 
-원인: Kafka 3.0+에서 `enable.idempotence` 기본값이 `true`로 바뀌었다. YAML에 `true`를 명시해도 클라이언트는 "기본값 그대로 = 사용자가 명시적으로 override한 게 아님"으로 간주해서, `acks`와 충돌하면 throw 대신 silent disable로 처리한다.
+`acks`는 TCP 연결이 잡힌 후 "응답 대기" 옵션이다. broker가 죽으면 TCP 연결 자체가 실패해 acks 값과 무관하게 send()가 깨진다. 이때 outbox에 쌓인 이벤트는 broker 복구 후 Poller가 자동으로 재시도한다.
 
-→ idempotence를 보장하려면 `acks=all`도 같이 명시. 한쪽만 바꾸면 의도와 다르게 동작할 수 있다.
+**linger.ms 비교 (20건)**
 
-**Test C — Kafka down 시 acks=0 vs acks=all**
-
-기대: acks=0은 broker 응답 안 기다리니 발행 성공으로 처리될 줄 알았음.
-실제: 둘 다 `published_at=NULL`, send 실패.
-
-원인: `acks`는 TCP 연결이 잡힌 후 "broker 응답 기다림" 옵션이지 "TCP 없이도 OK"가 아니다. broker가 죽으면 TCP handshake부터 실패해서 `acks` 값과 무관하게 send() 자체가 깨진다.
-
-**부가 검증 — Outbox 복구 동작**
-
-Kafka down → outbox에 이벤트 쌓임 → Kafka 복구 → Poller가 자동 retry → 발행 성공. Outbox의 At Least Once 보장이 실제 동작으로 확인됨.
-
-#### linger.ms (Outbox 동기 Poller 환경)
-
-20건을 outbox에 한 번에 INSERT → Poller가 처리하는 시간(first published_at → last published_at)을 비교.
-
-| 설정 | 20건 처리 시간 | event당 평균 |
-|---|---|---|
-| `linger.ms=0` (default) | 320 ms | ~16 ms |
-| `linger.ms=100` | 2533 ms | ~127 ms |
-
-linger.ms=100이 **약 8배 느림**.
-
-원인: 우리 Poller가 `for (event) { send().get(10s) }` 동기 패턴이라 매 iteration에 producer 버퍼엔 항상 1건만 들어감 → linger.ms 만큼 끝까지 대기 후 단일 메시지 flush → 매 event에 100ms 추가.
-
-→ linger.ms는 **여러 send()가 짧은 시간에 동시 발생**하는 환경(여러 producer 동시 호출, 비동기 send + flush 패턴)에서 batch 효과로 처리량↑·네트워크 RTT↓를 얻는 옵션. **현재 우리 Poller엔 안 맞음 — 0(default) 유지.**
-
-향후 개선: Poller를 비동기 send + 마지막에 한 번 flush() + 일괄 markAsPublished 패턴으로 바꾸면 linger.ms를 활용할 수 있음 (별도 작업).
-
-#### num.partitions (Broker 옵션)
-
-`catalog-events` 토픽을 `kafka-topics.sh --alter --partitions 3`으로 1→3 변경 후, productId 1~5에 대해 각 2건씩(=10건) 발행. partition별 분포 관찰.
-
-**결과**
-
-| Partition | 메시지 |
+| 설정 | 20건 처리 시간 |
 |---|---|
-| 0 | productId=1, productId=5 (각 2건) |
-| 1 | productId=4 (2건) |
-| 2 | productId=2, productId=3 (각 2건) |
+| `linger.ms=0` (기본) | 320 ms |
+| `linger.ms=100` | 2533 ms (~8배 느림) |
 
-**관찰**
+Poller가 `for (event) { send().get() }` 동기 패턴이라 매번 1건씩 전송한다. linger.ms를 높이면 배치를 기다리는 시간만 추가된다. 여러 send()가 동시에 일어나는 환경에서만 linger.ms가 의미 있다. **현재는 0 유지**.
 
-1. **같은 key는 항상 같은 partition** — productId=1의 LIKE_ADDED/LIKE_CANCELLED가 둘 다 partition 0. Consumer가 partition 단위 순차 처리하므로 같은 productId의 이벤트 순서 보장됨.
-2. **다른 key는 분산** — 5개 productId가 3 partition에 흩어짐 → Consumer 여러 인스턴스가 partition 나눠 처리 가능 → 처리량 증가.
-3. **해시 분산은 완벽 균등 아님** — key 개수가 적으면 hash collision으로 한쪽에 몰릴 수 있음. 운영에선 key 수가 많아 통계적으로 균등.
-4. **partition 늘려도 같은 key는 같은 partition 유지** — alter 전후 productId=1은 일관되게 partition 0. 해시 함수가 deterministic.
+**num.partitions — partition key와 순서 보장**
 
-**Outbox 설계와의 연결**
+`catalog-events`를 1→3 partition으로 늘리고 productId 1~5에 각 2건씩 발행:
 
-- `catalog-events` partition key = `productId` → 한 상품의 좋아요 변동이 순서 보장되어야 likeCount 정확
-- `order-events` partition key = `orderId` → 같은 주문 이벤트가 같은 consumer로 가서 멱등 처리 편리
+| Partition | productId |
+|---|---|
+| 0 | 1, 5 |
+| 1 | 4 |
+| 2 | 2, 3 |
 
-**트레이드오프**
-
-- partition 많을수록 처리량↑, 같은 key 내 순서 보장은 유지
-- 너무 많으면 broker 메모리/디스크 부담↑, leader election/리밸런싱 비용↑
-- 적정선: 예상 throughput ÷ 단일 partition 처리량으로 추정
+- 같은 key는 항상 같은 partition → 같은 productId 이벤트 순서 보장
+- Consumer 인스턴스를 늘리면 partition을 나눠 처리 → 처리량 증가 (최대 partition 수까지)
+- 해시 분산은 완벽 균등이 아님 (key 수가 적으면 쏠릴 수 있음)
 
 ---
 
-## 공통 — Kafka Broker 옵션
+## 공통 — Kafka Broker 옵션 (다중 브로커 실험)
 
-브로커는 직접 구현하지 않고 Kafka 설정값으로만 동작을 조정한다.
+단일 broker에서 `acks=all`은 기다릴 follower가 없어 `acks=1`과 동일하다. 3-broker 클러스터(전용 controller 1 + broker 3)로 실제 동작 검증.
 
-| 옵션 | 기본값 | 역할 | 테스트 |
-|---|---|---|---|
-| `min.insync.replicas` | `1` | `acks=all` 시 최소 동기화 복제본 수. 이 수 미만이면 발행 거부 | ★ |
-| `auto.create.topics.enable` | `true` | 존재하지 않는 토픽에 발행 시 자동 생성 여부 | ★ |
-| `num.partitions` | `1` | 토픽 기본 파티션 수 | ★ |
-| `default.replication.factor` | `1` | 토픽 기본 복제본 수 | |
-| `log.retention.hours` | `168` | 메시지 보존 기간 (7일) | |
-| `log.retention.bytes` | `-1` | 파티션당 최대 보존 크기 (-1=무제한) | |
-| `message.max.bytes` | `1048576` | 브로커가 허용하는 최대 메시지 크기 (1MB) | |
+> combined(`broker,controller`) 모드로 3노드를 두면 broker 2대를 죽일 때 controller 쿼럼도 함께 깨진다. 전용 controller를 분리하면 broker를 죽여도 쿼럼이 유지돼 `min.insync.replicas` 발동을 깔끔히 관찰할 수 있다.
 
-★ 표시가 테스트해볼 만한 옵션.
+### acks=1 vs acks=all 지연
 
-### 다중 브로커 실험 (acks · min.insync.replicas · outbox 복구)
+| acks | 처리량 | 평균 지연 |
+|---|---|---|
+| `1` (리더만) | ~26,500 rec/s | ~219 ms |
+| `all` (ISR 전원) | ~18,900 rec/s | ~467 ms |
 
-우리 outbox → Kafka 설계의 At-Least-Once 보장은 전부 `acks=all`에 걸려 있다. 그런데 단일 broker에선 `acks=all`이 사실상 `acks=1`이라(기다릴 follower 없음) **그 보장이 한 번도 실제로 검증된 적이 없었다.** 3-broker 클러스터로 재현.
+`acks=all`은 follower ack 대기로 처리량 30% 감소, 지연 2배. 내구성은 공짜가 아니다. 그래서 유실 허용인 조회수는 Outbox 없이 직접 발행하고, 유실 불가인 likeCount/salesCount는 이 비용을 감수한다.
 
-> **컨슈머는 다중 broker가 거의 불필요하다.** 컨슈머 동작(group/partition/offset)은 broker 1대 + 컨슈머 여러 개로 충분히 재현된다. 다중 broker는 **프로듀서/내구성 축**의 주제다.
+### min.insync.replicas
 
-**토폴로지 — 전용 controller 1 + broker 3** (`docker-compose.multi-broker.yml`)
-
-combined(`broker,controller`) 모드로 3노드를 두면 broker 2대를 죽일 때 controller 쿼럼(3중 2)도 함께 깨져 ISR 변경이 메타데이터에 반영되지 않는다. 전용 controller를 분리하면 broker를 죽여도 쿼럼이 유지돼 `min.insync.replicas` 발동을 깔끔히 관찰할 수 있다. 핵심 설정: 내부 토픽 RF=3(`offsets.topic.replication.factor` 등), `default.replication.factor=3`, `min.insync.replicas=2`. 토픽은 `--replication-factor 3 --config min.insync.replicas=2`로 생성.
-
-> 실행 명령은 docker exec로 broker 컨테이너 내 CLI(`kafka-topics.sh`, `kafka-producer-perf-test.sh`)를 쓴다. Windows Git Bash는 `/opt/...` 경로를 변환하므로 **PowerShell**에서 실행.
-
-#### ① acks=1 vs acks=all 지연 (Test A 재측정)
-
-클러스터 정상(ISR=3)일 때 `kafka-producer-perf-test`로 2만 건 발행.
-
-| acks | 처리량 | 평균 지연 | p99 |
-|---|---|---|---|
-| `1` (리더만) | ~26,500 rec/s | ~219 ms | ~410 ms |
-| `all` (ISR=2 ack 대기) | ~18,900 rec/s | ~467 ms | ~747 ms |
-
-→ `acks=all`은 follower ack 대기로 **지연 약 2배, 처리량 약 30%↓**. 단일 broker에선 묻혔던 내구성의 비용이 드러난다.
-
-#### ② min.insync.replicas 발동
-
-리더(broker2)는 살려둔 채 follower만 하나씩 죽이며 `acks=all` 발행을 관찰.
+`acks=all`과 짝을 이루는 broker 옵션. ISR이 이 숫자 미만이면 발행 자체를 거부한다.
 
 | 상태 | ISR | acks=all 발행 |
 |---|---|---|
 | 전체 정상 | 3 | 성공 |
 | broker 1대 down | 2 | **성공** (2 ≥ min 2) |
-| broker 2대 down | 1 | **거부** — `NotEnoughReplicasException`: "fewer in-sync replicas than required" (0 records sent) |
+| broker 2대 down | 1 | **거부** — `NotEnoughReplicasException` |
 
-→ 리더가 **살아있어도** ISR이 `min.insync.replicas` 미만이면 `acks=all` 쓰기를 거부한다. RF=3 / min.insync=2 = "1대 장애는 버티고, 2대 장애면 차라리 멈춘다"는 가용성↔내구성 균형점. `min.insync.replicas=1`이었다면 ISR=1에서도 썼겠지만 그 1벌이 죽으면 유실.
+리더가 살아있어도 ISR이 min.insync.replicas 미만이면 쓰기를 거부한다. RF=3 / min.insync=2는 "1대 장애는 버티고, 2대 장애면 차라리 멈춘다"는 가용성↔내구성 균형점.
 
-#### ③ outbox 복구 안전망
-
-죽인 broker를 복구(`docker start`)하면 ISR이 회복되고, (Poller가 재시도할) `acks=all` 발행이 **다시 성공**한다.
-
-→ ISR 부족으로 발행이 거부되는 동안 이벤트는 `outbox_events`에 `published_at=NULL`로 남고, `OutboxPoller`가 5초마다 미발행분을 재시도한다. broker 복구 후 같은 재시도가 성공 → **유실 없음(At Least Once)**. "Kafka down → outbox 잔류 → 복구 → 자동 retry"를 다중 broker ISR 부족 상황으로 확장 검증.
-
-**교훈**: ①`acks=all`은 다중 broker에서만 진짜 의미를 갖는다. ②`min.insync.replicas`는 가용성↔내구성 다이얼이다. ③내구성은 공짜가 아니다(지연 ~2배) — 그래서 좋아요(유실 허용)는 느슨해도 되고 결제(유실 불가)는 이 비용을 받아들인다. ④outbox가 ISR 부족까지 흡수한다.
+broker가 죽어 발행이 거부되는 동안 outbox에 `published_at=NULL`로 이벤트가 쌓인다. broker 복구 후 Poller가 자동으로 재시도해 유실 없이 처리된다 — Outbox가 ISR 부족까지 흡수한다.
 
 ---
 
 ## 공통 — Kafka Consumer 옵션
 
-| 옵션 | 기본값 | 현재 설정 | 역할 | 테스트 |
-|---|---|---|---|---|
-| `group.id` | 없음 | 설정 필요 | Consumer 그룹 식별자. 같은 그룹 내에서는 파티션을 나눠 처리(분담). 다른 그룹은 같은 토픽을 독립적으로 모두 수신(fan-out) | ★ |
-| `auto.offset.reset` | `latest` | 설정 필요 | 커밋된 offset이 없을 때(최초 구독·offset 만료) 시작 위치. `earliest`=토픽 처음부터, `latest`=구독 이후 새 메시지만 | ★ |
-| `enable.auto.commit` | `true` | `false` | 처리 완료 여부와 무관하게 poll 후 주기적으로 offset 자동 커밋. `true`이면 처리 전 크래시해도 '처리된 것'으로 기록 → 유실. at-least-once 보장에는 `false` + manual Ack 필수 | ★ |
-| `max.poll.records` | `500` | 기본값 | poll() 한 번에 가져올 최대 메시지 수. 값이 크면 처리량↑이지만 처리 시간이 길어져 `max.poll.interval.ms` 초과 위험↑ | ★ |
-| `max.poll.interval.ms` | `300000` | 기본값 | poll() 호출 간격 최대 허용 시간. 처리가 느려 이 값을 초과하면 그룹에서 추방 → 리밸런싱 + `CommitFailedException`. `session.timeout`은 heartbeat 기반, 이 옵션은 poll 기반 — 별개 메커니즘 | ★ |
-| `session.timeout.ms` | `45000` | 기본값 | broker가 heartbeat를 이 시간 안에 못 받으면 Consumer 장애로 판단 → 리밸런싱. heartbeat 스레드가 처리와 독립 동작해서 처리 중에도 신호를 보낼 수 있음 | |
-| `heartbeat.interval.ms` | `3000` | 기본값 | Consumer → broker 생존 신호 주기. `session.timeout.ms`의 1/3 이하로 유지해야 timeout 전 여러 번 전송 가능 | |
-| `fetch.min.bytes` | `1` | 기본값 | broker가 fetch 요청에 응답하기 위한 최소 데이터량(bytes). 이 크기가 안 차면 `fetch.max.wait.ms`까지 대기 → 소량 트래픽 시 빈 응답 감소 | |
-| `fetch.max.wait.ms` | `500` | 기본값 | `fetch.min.bytes` 충족 전 최대 대기 시간. 시간이 지나면 충족 못 해도 응답. `fetch.min.bytes`와 짝 | |
-| `isolation.level` | `read_uncommitted` | 기본값 | Kafka 트랜잭션 메시지 읽기 수준. `read_uncommitted`=미커밋 포함, `read_committed`=커밋된 것만(Kafka Producer 트랜잭션 사용 시만 의미 있음) | |
+| 옵션 | 현재 설정 | 역할 |
+|---|---|---|
+| `group.id` | 설정 필요 | 같은 그룹: partition을 나눠 처리(분담). 다른 그룹: 같은 토픽을 각자 전부 수신(fan-out) |
+| `auto.offset.reset` | 설정 필요 | 처음 구독 시 시작 위치. `earliest`=처음부터, `latest`=구독 이후 새 것만 |
+| `enable.auto.commit` | `false` | `true`면 처리 전 크래시해도 처리된 것으로 기록 → 유실. at-least-once는 `false` + manual Ack 필수 |
+| `max.poll.records` | `500` (기본) | poll() 한 번에 가져올 최대 메시지 수. 크면 처리량↑이지만 처리 시간이 길어져 추방 위험↑ |
+| `max.poll.interval.ms` | `300000` (기본) | poll() 호출 간격 최대 허용 시간. 초과 시 그룹에서 추방 → 리밸런싱 |
+| `session.timeout.ms` | `45000` (기본) | heartbeat 미수신 시 장애로 판단 → 리밸런싱 |
 
-★ 표시가 테스트해볼 만한 옵션.
+> **리밸런싱**: 그룹 내 Consumer가 추가/제거될 때 파티션 할당을 재조정. 이 동안 그룹 전체가 처리를 멈춘다(Stop-the-world).
 
-> **리밸런싱(Rebalancing)**: 그룹 내 Consumer가 추가되거나 제거(추방 포함)될 때 파티션 할당을 재조정하는 과정. 리밸런싱 중에는 그룹 전체가 처리를 멈춘다(Stop-the-world). Consumer가 그룹에서 추방되면 보유하던 파티션이 다른 Consumer에게 넘어간다.
->
-> **장애 감지 두 갈래** — `session.timeout.ms`는 heartbeat 스레드가 broker와 통신 못 할 때(네트워크 단절·프로세스 크래시) 발동한다. `max.poll.interval.ms`는 처리 로직이 느려 poll()을 제때 못 부를 때 발동한다. 둘 다 리밸런싱으로 이어지지만 원인이 다르다. 처리가 느린 경우엔 `session.timeout`을 아무리 늘려도 해결 안 되고 `max.poll.interval.ms`를 늘리거나 `max.poll.records`를 줄여야 한다.
+> **장애 감지 두 갈래**: `session.timeout.ms`는 네트워크 단절·프로세스 크래시를 감지한다. `max.poll.interval.ms`는 처리 로직이 느려 poll을 제때 못 부를 때 감지한다. 처리가 느려서 생긴 문제라면 session.timeout을 늘려도 해결 안 되고 max.poll.interval.ms를 늘리거나 max.poll.records를 줄여야 한다.
 
 ### 옵션 테스트 결과
 
-raw Kafka client로 옵션을 격리해 동작을 관찰 (`ConsumerOptionsExperimentTest`, Testcontainer `apache/kafka:3.8.1`). 우리 `@KafkaListener`는 default factory 위에서 같은 의미로 동작한다.
-
-#### auto.offset.reset (earliest vs latest)
-
-새 그룹(커밋된 offset 없음)이 토픽을 처음 구독할 때 시작 위치.
+**auto.offset.reset**
 
 | 설정 | 시나리오 | 결과 |
 |---|---|---|
-| `earliest` | 메시지 3건 발행 **후** 새 그룹 구독 | 3건 모두 읽음 (m1, m2, m3) |
-| `latest` | 2건 발행 후 구독·할당 → 1건 추가 발행 | 추가분 1건만 읽음 (이전 2건 skip) |
+| `earliest` | 메시지 3건 발행 후 새 그룹 구독 | 3건 모두 읽음 |
+| `latest` | 2건 발행 후 구독, 1건 추가 발행 | 추가분 1건만 읽음 |
 
-→ **통합 테스트가 `earliest`를 쓰는 이유**: 테스트는 발행 후 Consumer가 붙으므로 `latest`면 메시지를 놓친다. 운영 default는 `latest`(과거 폭주분 재처리 방지)지만, 우리 Consumer는 `kafka.yml`에서 명시적으로 설정해 의도를 고정한다.
+통합 테스트에서 `earliest`를 쓰는 이유: 테스트는 발행 후 Consumer가 붙으므로 `latest`면 메시지를 놓친다.
 
-#### enable.auto.commit (true vs false)
+**enable.auto.commit**
 
-poll만 하고 **처리 전에 죽는** 상황(crash before processing)을 모사한 뒤, 같은 그룹의 다음 Consumer가 그 메시지를 다시 받는지 관찰.
+poll 후 처리 전 크래시 상황 시뮬레이션:
 
-| 설정 | crash 후 재구독 시 | 의미 |
-|---|---|---|
-| `true` | 못 받음 (0건) | offset이 (poll/close 시점에) 자동 커밋돼 **유실** |
-| `false` (manual) | 다시 받음 (1건) | ack 안 했으니 미커밋 → **재시도** |
+| 설정 | 재구독 시 |
+|---|---|
+| `true` | 못 받음 (offset 자동 커밋돼 유실) |
+| `false` (manual) | 다시 받음 (ack 안 했으니 재시도) |
 
-→ at-least-once를 보장하려면 `false` + manual Ack가 필수다. 우리 설정(`enable.auto.commit=false`, `ack-mode=manual`)이 이 동작을 보장한다. `true`였다면 처리 실패가 곧 메시지 유실이다.
+**max.poll.interval.ms**
 
-#### max.poll.interval.ms (리밸런싱)
+`max.poll.interval.ms=2000`에서 4초 처리(sleep)로 초과시킴 → `commitSync()`가 `CommitFailedException`으로 실패. 이미 그룹에서 추방돼 파티션 소유권을 잃었기 때문. 커밋 실패 → offset 안 올라감 → 리밸런싱 후 재처리.
 
-`max.poll.interval.ms=2000`으로 짧게 두고, poll 후 4초간 처리(sleep)해서 한도를 초과시킴.
+**group.id (fan-out vs 분담)**
 
-기대: 한도 초과 시 Consumer가 그룹에서 추방.
-실제: 이후 `commitSync()`가 **`CommitFailedException`**으로 실패 — 이미 그룹에서 빠져 파티션 소유권을 잃었기 때문. 커밋이 실패하면 offset이 안 올라가므로 그 메시지는 리밸런싱 후 **재처리**된다.
-
-→ 처리 시간이 긴 작업은 `max.poll.interval.ms`를 늘리거나 `max.poll.records`를 줄여야 한다. 안 그러면 "느린 처리 → 추방 → 재처리 → 또 느림"의 악순환과 중복 처리가 생긴다. (우리 `KafkaConfig.BATCH_LISTENER`는 2분으로 늘려둠.)
-
-#### group.id (fan-out vs 분담)
-
-2 partition 토픽에 양쪽 1건씩 발행.
+2 partition 토픽에 각 1건 발행:
 
 | 구성 | 결과 |
 |---|---|
-| **다른 그룹** 2개가 같은 토픽 구독 | 각 그룹이 **전부**(2건) 수신 — fan-out |
-| **같은 그룹** Consumer 2개 | partition을 나눠 가짐 — 각자 1건씩 (합치면 전체) |
+| 다른 그룹 2개 | 각 그룹이 전부(2건) 수신 — fan-out |
+| 같은 그룹 Consumer 2개 | 각자 1건씩 (partition 분담) |
 
-→ `like-aggregator`와 `sales-aggregator`가 다른 그룹이라 서로 영향 없이 각자 집계한다(설령 같은 토픽이어도 fan-out). 같은 그룹 안에서 인스턴스를 늘리면 partition을 분담해 처리량이 오른다(최대 partition 수까지). **관찰된 레이스**: 두 Consumer가 동시에 안정적으로 조인하기 전, 먼저 조인한 쪽이 두 partition을 잠깐 다 가질 수 있다 → 테스트는 1:1 할당이 안정된 뒤 발행하도록 했다.
+`like-aggregator`와 `view-aggregator`가 다른 그룹이라 같은 `catalog-events` 토픽에서 각자 독립적으로 집계한다.
 
 ---
 
-## 공통 — ApplicationEvent 설계 점검
-
-`판단 기준`의 세 분기 중 **"유실 허용 → `@TransactionalEventListener(AFTER_COMMIT)`"** 에 해당하는 인프로세스 이벤트들. Outbox(유실 불가)와 짝을 이루는 비동기 분기다.
-
-### 현재 ApplicationEvent 목록
+## 공통 — ApplicationEvent 목록
 
 | 이벤트 | 발행처 | phase | 목적 | 리스너 |
 |---|---|---|---|---|
-| `PaymentConfirmedEvent` | `PaymentFacade.applyPgResult` (SUCCESS) | AFTER_COMMIT | 알림 | `PaymentEventListener` (현재 log) |
-| `PaymentFailedEvent` | `PaymentFacade.applyPgResult` (FAIL) | AFTER_COMMIT | 알림 | `PaymentEventListener` (현재 log) |
-| `OrderCreatedEvent` | `OrderFacade.createOrder` | AFTER_COMMIT | 행동 로그 | `UserActionLogListener` (현재 log) |
-| `ProductViewedEvent` | `ProductFacade.getProduct` | AFTER_COMMIT | 행동 로그 + 조회수 전파 | `UserActionLogListener`(log) · `ProductViewEventPublisher`(Kafka 직접) |
+| `PaymentConfirmedEvent` | `PaymentFacade.applyPgResult` (SUCCESS) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
+| `PaymentFailedEvent` | `PaymentFacade.applyPgResult` (FAIL) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
+| `OrderCreatedEvent` | `OrderFacade.createOrder` | AFTER_COMMIT | 행동 로그 | `UserActionLogListener` |
+| `ProductViewedEvent` | `ProductFacade.getProduct` | AFTER_COMMIT | 행동 로그 + 조회수 전파 | `UserActionLogListener` · `ProductViewEventPublisher` |
 
-> `PaymentConfirmedEvent`(알림)와 `order-events` Outbox INSERT(집계)는 목적이 달라 같은 SUCCESS 분기에서 **공존**한다 — 하나는 유실 허용(알림), 하나는 유실 불가(집계).
->
-> `OrderCreatedEvent`·`ProductViewedEvent`는 한 `UserActionLogListener`가 함께 받아 행동 로그를 한곳에 모은다(도메인은 전용 이벤트, 로깅은 cross-cutting). `ProductViewedEvent`는 추가로 `ProductViewEventPublisher`가 Kafka 직접 발행해 조회수 집계로도 전파한다 — 같은 이벤트, 다른 리스너, 다른 목적.
-
-### 분리 기준 적합성
-
-**잘 지킨 점**
-
-- **기준이 명문화**되어 있고 일관 적용 — 알림/로그(유실 허용)는 AFTER_COMMIT, 집계(유실 불가, streamer)는 Outbox+Kafka.
-- **AFTER_COMMIT가 실제로 발화** — 발행이 `@Transactional` 메서드(`handleCallback`·`recoverPayment`·`createOrder`) 안에서 일어난다. TX 밖에서 publish하면 이벤트가 조용히 버려지는 흔한 함정을 피했고, 롤백된 데이터로 리스너가 동작할 위험도 없다.
-- **결제를 성공/실패 별도 이벤트로 분리** — 상태 플래그 하나가 아니라 두 타입이라 리스너가 관심사만 구독한다. 이벤트는 불변 record + 과거형 명명.
-
-**정리한 점 (기준에서 벗어나 있던 것)**
-
-1. **고아 좋아요 이벤트 제거** — `LikeAddedEvent`/`LikeCancelledEvent` record와 `LikeEventListenerTest`가 Outbox 이관 후에도 남아 있었다(리스너는 이미 삭제). `LikeEventListenerTest`가 삭제된 클래스를 참조해 **commerce-api 테스트 컴파일이 깨진 상태**였고, 이를 정리하며 해소.
-2. **주문 이벤트를 도메인 이벤트로 정렬** — 주문 생성이 제네릭 `UserActionEvent(action="ORDER", targetType="order", …)`(stringly-typed)를 발행하고 있었다. 다른 도메인은 전용 이벤트를 쓰는데 주문만 catch-all 이라 타입 안전성·구독 분기에서 손해. → `OrderCreatedEvent(orderId, userId)` 도메인 이벤트로 교체하고 제네릭 `UserActionEvent`/`UserActionEventListener`는 제거. 이제 모든 도메인 이벤트가 `{domain}/domain/event` + 전용 타입 규칙으로 통일.
-
-**남은 주의점**
-
-- 현재 리스너는 전부 **로깅만** 한다 → `@Async`가 불필요(새 커넥션을 안 씀). 다만 이건 "우연히 안전"한 상태로, 나중에 리스너에 DB 쓰기/외부 호출을 넣으면 좋아요 ApplicationEvent 섹션에서 설명한 `@Async` + 커넥션 풀 고갈 이슈를 똑같이 마주한다.
+> `PaymentConfirmedEvent`(알림)와 `order-events` Outbox INSERT(집계)는 목적이 달라 같은 SUCCESS 분기에 공존한다 — 하나는 유실 허용(알림), 하나는 유실 불가(집계).
 
 ---
 
@@ -578,17 +451,18 @@ outbox_events (id, aggregate_id, topic, event_type, payload JSON, created_at, pu
 event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 ```
 
-### Outbox 사용 시 주의사항
+`outbox_events`는 Producer 쪽, `event_handled`는 Consumer 쪽. 역할이 분리된다.
 
-| 문제 | 원인 | 해결 |
+### 주의사항
+
+| 문제 | 원인 | 대응 |
 |---|---|---|
-| 최대 N초 지연 | Poller 실행 주기만큼 늦게 전달됨 | Eventual Consistency 허용 (집계 특성상 무방) |
-| Poller 중단 시 이벤트 누적 | outbox_events 테이블이 계속 쌓임 | 모니터링 + 알람 |
-| 중복 발행 | Kafka 발행 후 `published_at` 업데이트 전 크래시 시 재발행 | Consumer `event_handled` 멱등 처리로 흡수 |
-| 다중 인스턴스 중복 처리 | 서버마다 Poller가 같은 이벤트를 동시에 가져감 | `SELECT ... SKIP LOCKED` 또는 분산 락 |
+| 최대 N초 지연 | Poller 실행 주기 | 집계 특성상 허용 |
+| Poller 중단 시 이벤트 누적 | outbox_events 계속 쌓임 | 모니터링 + 알람 |
+| 중복 발행 | 발행 성공 후 published_at 갱신 전 크래시 | Consumer event_handled로 흡수 |
+| 다중 인스턴스 중복 처리 | 서버마다 Poller가 동시에 가져감 | `SELECT ... SKIP LOCKED` 또는 분산 락 |
 
-> Outbox는 **유실 방지(At Least Once)** 는 보장하지만 **정확히 한 번(Exactly Once)** 은 보장하지 않는다.
-> 중복 처리 방어는 Consumer 책임.
+> Outbox는 **At Least Once**를 보장한다. **Exactly Once**는 보장하지 않는다. 중복 방어는 Consumer 책임.
 
 ---
 
