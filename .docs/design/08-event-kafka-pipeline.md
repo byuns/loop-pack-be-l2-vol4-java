@@ -200,6 +200,53 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 Kafka down → outbox에 이벤트 쌓임 → Kafka 복구 → Poller가 자동 retry → 발행 성공. Outbox의 At Least Once 보장이 실제 동작으로 확인됨.
 
+#### linger.ms (Outbox 동기 Poller 환경)
+
+20건을 outbox에 한 번에 INSERT → Poller가 처리하는 시간(first published_at → last published_at)을 비교.
+
+| 설정 | 20건 처리 시간 | event당 평균 |
+|---|---|---|
+| `linger.ms=0` (default) | 320 ms | ~16 ms |
+| `linger.ms=100` | 2533 ms | ~127 ms |
+
+linger.ms=100이 **약 8배 느림**.
+
+원인: 우리 Poller가 `for (event) { send().get(10s) }` 동기 패턴이라 매 iteration에 producer 버퍼엔 항상 1건만 들어감 → linger.ms 만큼 끝까지 대기 후 단일 메시지 flush → 매 event에 100ms 추가.
+
+→ linger.ms는 **여러 send()가 짧은 시간에 동시 발생**하는 환경(여러 producer 동시 호출, 비동기 send + flush 패턴)에서 batch 효과로 처리량↑·네트워크 RTT↓를 얻는 옵션. **현재 우리 Poller엔 안 맞음 — 0(default) 유지.**
+
+향후 개선: Poller를 비동기 send + 마지막에 한 번 flush() + 일괄 markAsPublished 패턴으로 바꾸면 linger.ms를 활용할 수 있음 (별도 작업).
+
+#### num.partitions (Broker 옵션)
+
+`catalog-events` 토픽을 `kafka-topics.sh --alter --partitions 3`으로 1→3 변경 후, productId 1~5에 대해 각 2건씩(=10건) 발행. partition별 분포 관찰.
+
+**결과**
+
+| Partition | 메시지 |
+|---|---|
+| 0 | productId=1, productId=5 (각 2건) |
+| 1 | productId=4 (2건) |
+| 2 | productId=2, productId=3 (각 2건) |
+
+**관찰**
+
+1. **같은 key는 항상 같은 partition** — productId=1의 LIKE_ADDED/LIKE_CANCELLED가 둘 다 partition 0. Consumer가 partition 단위 순차 처리하므로 같은 productId의 이벤트 순서 보장됨.
+2. **다른 key는 분산** — 5개 productId가 3 partition에 흩어짐 → Consumer 여러 인스턴스가 partition 나눠 처리 가능 → 처리량 증가.
+3. **해시 분산은 완벽 균등 아님** — key 개수가 적으면 hash collision으로 한쪽에 몰릴 수 있음. 운영에선 key 수가 많아 통계적으로 균등.
+4. **partition 늘려도 같은 key는 같은 partition 유지** — alter 전후 productId=1은 일관되게 partition 0. 해시 함수가 deterministic.
+
+**Outbox 설계와의 연결**
+
+- `catalog-events` partition key = `productId` → 한 상품의 좋아요 변동이 순서 보장되어야 likeCount 정확
+- `order-events` partition key = `orderId` → 같은 주문 이벤트가 같은 consumer로 가서 멱등 처리 편리
+
+**트레이드오프**
+
+- partition 많을수록 처리량↑, 같은 key 내 순서 보장은 유지
+- 너무 많으면 broker 메모리/디스크 부담↑, leader election/리밸런싱 비용↑
+- 적정선: 예상 throughput ÷ 단일 partition 처리량으로 추정
+
 ---
 
 ## 공통 — Kafka Broker 옵션
