@@ -82,11 +82,49 @@ ApplicationEvent 방식의 유실 문제를 해결하기 위해 Outbox로 교체
 
 ---
 
-### Consumer — 미구현
+### Consumer — 완료
 
-- `commerce-collector` 모듈에서 `catalog-events` 구독
-- `product_metrics` 테이블에 like_count upsert
-- manual Ack + `event_handled` 테이블로 멱등 처리
+`commerce-streamer` 모듈에서 `catalog-events` 구독, `product_metrics.like_count` upsert.
+
+**생성 파일**
+- `metrics/domain/ProductMetricsModel.java` — `product_metrics` 엔티티 (`productId` unique, `likeCount`, `salesCount`)
+- `metrics/domain/ProductMetricsRepository.java`, `infrastructure/ProductMetricsJpaRepository.java`, `infrastructure/ProductMetricsRepositoryImpl.java`
+- `eventhandled/domain/EventHandledModel.java` — `event_id` PK, `handled_at`
+- `eventhandled/domain/EventHandledRepository.java`, `infrastructure/EventHandledJpaRepository.java`, `infrastructure/EventHandledRepositoryImpl.java`
+- `like/application/LikeAggregatorService.java` — `@Transactional` 안에서 멱등 체크 + like_count 증감
+- `like/interfaces/consumer/LikeEventConsumer.java` — `@KafkaListener(topics="catalog-events", groupId="like-aggregator")`
+
+**수정 파일**
+- `modules/kafka/src/main/resources/kafka.yml`
+  - 오타 수정: `value-serializer` → `value-deserializer` (Consumer엔 serializer가 없음. 그동안 무시되고 default 적용되던 버그)
+  - local/test 프로필 bootstrap-servers: `localhost:19092` → `localhost:9092` (docker-compose 환경에 맞춤)
+- `apps/commerce-streamer/src/main/resources/application.yml`
+  - `server.port: 8085` (commerce-api의 8080·management 8081과 충돌 회피)
+  - `application.name: commerce-api → commerce-streamer` (copy-paste 흔적 정리)
+  - `monitoring.yml` import 제거 — 이걸 import하면 actuator port 8081로 강제되어 commerce-api의 management와 충돌
+
+**처리 흐름**
+
+```
+1. catalog-events에 LIKE_ADDED 도착
+2. Consumer 수신 → eventId = "catalog-events:" + partition + ":" + offset
+3. @Transactional 내부:
+   a. event_handled에 eventId 존재? → 있으면 skip + ack
+   b. event_handled INSERT (멱등 기록)
+   c. product_metrics.like_count +1 (없으면 새로 생성)
+4. ack.acknowledge() → offset commit
+5. 처리 실패 → ack 안 함 → 다음 poll에 재시도 (영속 실패 시 lag 누적)
+```
+
+**Consumer group**: `like-aggregator`
+- catalog-events 3 partition 모두 단일 consumer가 처리 (현재 인스턴스 1개)
+- 향후 부하 증가 시 인스턴스 수 늘려서 partition 분담 가능 (최대 3개)
+- 결제 집계용 sales-aggregator group은 같은 토픽이 아니라 order-events 구독이라 무관
+
+**알려진 한계 (후속 보강)**
+
+1. **Producer 재시작 후 중복**: outbox poller가 broker write 성공 → published_at 갱신 전 크래시 → 재시작 후 같은 outbox 이벤트를 새 (partition, offset)으로 재발행. 현재 eventId가 Kafka 좌표 기반이라 중복 감지 불가. **해결**: OutboxPoller가 outbox.id를 Kafka header로 함께 전달, Consumer가 그걸 eventId로 사용.
+2. **DLT 미구현**: 영속 실패 시 lag 무한 누적. production 가기 전 도입 필요.
 
 ---
 
@@ -313,6 +351,6 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 
 | 도메인 | ApplicationEvent | Outbox Producer | Consumer |
 |---|---|---|---|
-| 좋아요 | ✅ 완료 | ✅ 완료 | ⬜ 미구현 |
+| 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (검증 미완) |
 | 결제 | ✅ 완료 | ✅ 완료 | ⬜ 미구현 |
 | 쿠폰 | — | — | ⬜ 미구현 |
