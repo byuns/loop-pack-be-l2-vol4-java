@@ -309,18 +309,22 @@ Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로
 
 | 옵션 | 기본값 | 현재 설정 | 역할 | 테스트 |
 |---|---|---|---|---|
-| `acks` | `1` | `all` | 브로커 응답 수준 (0=없음, 1=리더, all=전체 ISR) | ★ |
-| `enable.idempotence` | `false` | `true` | 재시도 시 중복 발행 방지 | ★ |
-| `retries` | `2147483647` | 기본값 | 발행 실패 시 재시도 횟수 | ★ |
+| `acks` | `1` | `all` | 브로커가 '성공'으로 응답하는 기준. `0`=응답 대기 없이 즉시 OK(유실 위험), `1`=리더 저장 시 OK, `all`=ISR 전원 저장 시 OK(가장 안전). 단일 broker에선 `all`과 `1` 실질 동일 | ★ |
+| `enable.idempotence` | `false` | `true` | 재시도 시 Producer가 같은 메시지를 broker에 두 번 쓰는 것 방지. Kafka가 sequence number로 중복 감지. `acks=all` 없이 단독 설정하면 조용히 `false`로 강등 | ★ |
+| `retries` | `2147483647` | 기본값 | 발행 실패 시 재시도 횟수. 기본값이 사실상 무한이라 `delivery.timeout.ms`(120초)가 실질 한도 | ★ |
 | `retry.backoff.ms` | `100` | 기본값 | 재시도 간격 (ms) | |
-| `linger.ms` | `0` | 기본값 | 배치 전송 대기 시간 (0=즉시 전송) | ★ |
-| `batch.size` | `16384` | 기본값 | 배치 최대 크기 (bytes) | |
-| `compression.type` | `none` | 기본값 | 압축 방식 (none, gzip, snappy, lz4) | |
-| `max.in.flight.requests.per.connection` | `5` | 기본값 | 응답 대기 중 최대 요청 수 (순서 보장 시 1로 설정) | |
-| `request.timeout.ms` | `30000` | 기본값 | 브로커 응답 대기 타임아웃 | |
-| `delivery.timeout.ms` | `120000` | 기본값 | 발행 최종 타임아웃 (retries 포함) | |
+| `linger.ms` | `0` | 기본값 | 같은 파티션 메시지를 N ms 모아서 한 번에 전송(배치). `0`=즉시 전송. `batch.size`가 먼저 차면 즉시 flush | ★ |
+| `batch.size` | `16384` | 기본값 | `linger.ms` 대기 중 파티션별 배치가 이 크기(bytes)를 초과하면 즉시 flush. `linger.ms`와 짝: 크기 OR 시간 중 먼저 되면 전송 | |
+| `compression.type` | `none` | 기본값 | 메시지 압축 방식. CPU 사용↑, 네트워크 사용↓. 처리량 높을수록 압축 효과 큼 | |
+| `max.in.flight.requests.per.connection` | `5` | 기본값 | 브로커 응답 대기 중 동시에 보낼 수 있는 요청 수. `idempotence=false`이면 재시도 시 순서 역전 가능 → 순서 중요하면 `1`. `idempotence=true`이면 Kafka가 내부 재정렬하므로 `5`도 안전 | |
+| `request.timeout.ms` | `30000` | 기본값 | 단일 요청에 대한 broker 응답 대기 타임아웃 | |
+| `delivery.timeout.ms` | `120000` | 기본값 | 재시도 포함 최종 발행 타임아웃. 이 시간 안에 성공 못 하면 발행 실패 처리. `retries`의 실질 상한 | |
 
 ★ 표시가 테스트해볼 만한 옵션.
+
+> **ISR(In-Sync Replicas)**: 리더와 동기화 상태가 최신인 follower 집합. `acks=all`은 이 집합 전원이 저장을 확인해야 성공. broker가 죽거나 느려지면 ISR에서 제외되어 집합이 줄어든다.
+>
+> **세 옵션 묶음** — `acks=all` + `enable.idempotence=true` + `max.in.flight=5`는 Kafka 공식 권장 "순서 보장 + 중복 방지" 세트다. 하나만 바꿔도 보장이 깨진다: `acks`를 낮추면 `idempotence`가 조용히 꺼지고, `idempotence=true`이면 `max.in.flight=1`로 낮출 필요가 없다.
 
 ### 옵션 테스트 결과
 
@@ -464,18 +468,22 @@ combined(`broker,controller`) 모드로 3노드를 두면 broker 2대를 죽일 
 
 | 옵션 | 기본값 | 현재 설정 | 역할 | 테스트 |
 |---|---|---|---|---|
-| `group.id` | 없음 | 설정 필요 | Consumer 그룹 식별자. 같은 그룹은 파티션을 나눠서 처리 | ★ |
-| `auto.offset.reset` | `latest` | 설정 필요 | 오프셋 없을 때 시작 위치 (earliest=처음부터, latest=이후부터) | ★ |
-| `enable.auto.commit` | `true` | `false` | 오프셋 자동 커밋 여부 (manual Ack 사용 시 false) | ★ |
-| `max.poll.records` | `500` | 기본값 | 한 번 poll 시 가져올 최대 메시지 수 | ★ |
-| `max.poll.interval.ms` | `300000` | 기본값 | poll 간 최대 처리 시간. 초과 시 리밸런싱 발생 | ★ |
-| `session.timeout.ms` | `45000` | 기본값 | 브로커가 Consumer 장애로 판단하는 기준 시간 | |
-| `heartbeat.interval.ms` | `3000` | 기본값 | Consumer → 브로커 생존 신호 주기 (session.timeout의 1/3 권장) | |
-| `fetch.min.bytes` | `1` | 기본값 | 브로커가 응답하기 위한 최소 데이터 크기 | |
-| `fetch.max.wait.ms` | `500` | 기본값 | fetch.min.bytes 충족 전 최대 대기 시간 | |
-| `isolation.level` | `read_uncommitted` | 기본값 | 트랜잭션 메시지 읽기 수준 | |
+| `group.id` | 없음 | 설정 필요 | Consumer 그룹 식별자. 같은 그룹 내에서는 파티션을 나눠 처리(분담). 다른 그룹은 같은 토픽을 독립적으로 모두 수신(fan-out) | ★ |
+| `auto.offset.reset` | `latest` | 설정 필요 | 커밋된 offset이 없을 때(최초 구독·offset 만료) 시작 위치. `earliest`=토픽 처음부터, `latest`=구독 이후 새 메시지만 | ★ |
+| `enable.auto.commit` | `true` | `false` | 처리 완료 여부와 무관하게 poll 후 주기적으로 offset 자동 커밋. `true`이면 처리 전 크래시해도 '처리된 것'으로 기록 → 유실. at-least-once 보장에는 `false` + manual Ack 필수 | ★ |
+| `max.poll.records` | `500` | 기본값 | poll() 한 번에 가져올 최대 메시지 수. 값이 크면 처리량↑이지만 처리 시간이 길어져 `max.poll.interval.ms` 초과 위험↑ | ★ |
+| `max.poll.interval.ms` | `300000` | 기본값 | poll() 호출 간격 최대 허용 시간. 처리가 느려 이 값을 초과하면 그룹에서 추방 → 리밸런싱 + `CommitFailedException`. `session.timeout`은 heartbeat 기반, 이 옵션은 poll 기반 — 별개 메커니즘 | ★ |
+| `session.timeout.ms` | `45000` | 기본값 | broker가 heartbeat를 이 시간 안에 못 받으면 Consumer 장애로 판단 → 리밸런싱. heartbeat 스레드가 처리와 독립 동작해서 처리 중에도 신호를 보낼 수 있음 | |
+| `heartbeat.interval.ms` | `3000` | 기본값 | Consumer → broker 생존 신호 주기. `session.timeout.ms`의 1/3 이하로 유지해야 timeout 전 여러 번 전송 가능 | |
+| `fetch.min.bytes` | `1` | 기본값 | broker가 fetch 요청에 응답하기 위한 최소 데이터량(bytes). 이 크기가 안 차면 `fetch.max.wait.ms`까지 대기 → 소량 트래픽 시 빈 응답 감소 | |
+| `fetch.max.wait.ms` | `500` | 기본값 | `fetch.min.bytes` 충족 전 최대 대기 시간. 시간이 지나면 충족 못 해도 응답. `fetch.min.bytes`와 짝 | |
+| `isolation.level` | `read_uncommitted` | 기본값 | Kafka 트랜잭션 메시지 읽기 수준. `read_uncommitted`=미커밋 포함, `read_committed`=커밋된 것만(Kafka Producer 트랜잭션 사용 시만 의미 있음) | |
 
 ★ 표시가 테스트해볼 만한 옵션.
+
+> **리밸런싱(Rebalancing)**: 그룹 내 Consumer가 추가되거나 제거(추방 포함)될 때 파티션 할당을 재조정하는 과정. 리밸런싱 중에는 그룹 전체가 처리를 멈춘다(Stop-the-world). Consumer가 그룹에서 추방되면 보유하던 파티션이 다른 Consumer에게 넘어간다.
+>
+> **장애 감지 두 갈래** — `session.timeout.ms`는 heartbeat 스레드가 broker와 통신 못 할 때(네트워크 단절·프로세스 크래시) 발동한다. `max.poll.interval.ms`는 처리 로직이 느려 poll()을 제때 못 부를 때 발동한다. 둘 다 리밸런싱으로 이어지지만 원인이 다르다. 처리가 느린 경우엔 `session.timeout`을 아무리 늘려도 해결 안 되고 `max.poll.interval.ms`를 늘리거나 `max.poll.records`를 줄여야 한다.
 
 ### 옵션 테스트 결과
 
