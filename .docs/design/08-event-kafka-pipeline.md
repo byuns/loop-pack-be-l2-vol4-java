@@ -380,6 +380,52 @@ linger.ms=100이 **약 8배 느림**.
 
 ★ 표시가 테스트해볼 만한 옵션.
 
+### 옵션 테스트 결과
+
+raw Kafka client로 옵션을 격리해 동작을 관찰 (`ConsumerOptionsExperimentTest`, Testcontainer `apache/kafka:3.8.1`). 우리 `@KafkaListener`는 default factory 위에서 같은 의미로 동작한다.
+
+#### auto.offset.reset (earliest vs latest)
+
+새 그룹(커밋된 offset 없음)이 토픽을 처음 구독할 때 시작 위치.
+
+| 설정 | 시나리오 | 결과 |
+|---|---|---|
+| `earliest` | 메시지 3건 발행 **후** 새 그룹 구독 | 3건 모두 읽음 (m1, m2, m3) |
+| `latest` | 2건 발행 후 구독·할당 → 1건 추가 발행 | 추가분 1건만 읽음 (이전 2건 skip) |
+
+→ **통합 테스트가 `earliest`를 쓰는 이유**: 테스트는 발행 후 Consumer가 붙으므로 `latest`면 메시지를 놓친다. 운영 default는 `latest`(과거 폭주분 재처리 방지)지만, 우리 Consumer는 `kafka.yml`에서 명시적으로 설정해 의도를 고정한다.
+
+#### enable.auto.commit (true vs false)
+
+poll만 하고 **처리 전에 죽는** 상황(crash before processing)을 모사한 뒤, 같은 그룹의 다음 Consumer가 그 메시지를 다시 받는지 관찰.
+
+| 설정 | crash 후 재구독 시 | 의미 |
+|---|---|---|
+| `true` | 못 받음 (0건) | offset이 (poll/close 시점에) 자동 커밋돼 **유실** |
+| `false` (manual) | 다시 받음 (1건) | ack 안 했으니 미커밋 → **재시도** |
+
+→ at-least-once를 보장하려면 `false` + manual Ack가 필수다. 우리 설정(`enable.auto.commit=false`, `ack-mode=manual`)이 이 동작을 보장한다. `true`였다면 처리 실패가 곧 메시지 유실이다.
+
+#### max.poll.interval.ms (리밸런싱)
+
+`max.poll.interval.ms=2000`으로 짧게 두고, poll 후 4초간 처리(sleep)해서 한도를 초과시킴.
+
+기대: 한도 초과 시 Consumer가 그룹에서 추방.
+실제: 이후 `commitSync()`가 **`CommitFailedException`**으로 실패 — 이미 그룹에서 빠져 파티션 소유권을 잃었기 때문. 커밋이 실패하면 offset이 안 올라가므로 그 메시지는 리밸런싱 후 **재처리**된다.
+
+→ 처리 시간이 긴 작업은 `max.poll.interval.ms`를 늘리거나 `max.poll.records`를 줄여야 한다. 안 그러면 "느린 처리 → 추방 → 재처리 → 또 느림"의 악순환과 중복 처리가 생긴다. (우리 `KafkaConfig.BATCH_LISTENER`는 2분으로 늘려둠.)
+
+#### group.id (fan-out vs 분담)
+
+2 partition 토픽에 양쪽 1건씩 발행.
+
+| 구성 | 결과 |
+|---|---|
+| **다른 그룹** 2개가 같은 토픽 구독 | 각 그룹이 **전부**(2건) 수신 — fan-out |
+| **같은 그룹** Consumer 2개 | partition을 나눠 가짐 — 각자 1건씩 (합치면 전체) |
+
+→ `like-aggregator`와 `sales-aggregator`가 다른 그룹이라 서로 영향 없이 각자 집계한다(설령 같은 토픽이어도 fan-out). 같은 그룹 안에서 인스턴스를 늘리면 partition을 분담해 처리량이 오른다(최대 partition 수까지). **관찰된 레이스**: 두 Consumer가 동시에 안정적으로 조인하기 전, 먼저 조인한 쪽이 두 partition을 잠깐 다 가질 수 있다 → 테스트는 1:1 할당이 안정된 뒤 발행하도록 했다.
+
 ---
 
 ## 공통 — Outbox 설계
