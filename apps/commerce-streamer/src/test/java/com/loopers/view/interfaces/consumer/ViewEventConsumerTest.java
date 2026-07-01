@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.support.Acknowledgment;
 
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -40,7 +41,7 @@ class ViewEventConsumerTest {
 
         @DisplayName("PRODUCT_VIEWED를 수신하면, productId/occurredAt을 파싱해 집계 서비스를 호출하고 ack한다.")
         @Test
-        void callsServiceAndAcks_whenProductViewed() {
+        void callsServiceAndAcks_whenProductViewed() throws Exception {
             // arrange
             String value = "{\"eventType\":\"PRODUCT_VIEWED\",\"productId\":1,\"occurredAt\":1000}";
 
@@ -54,7 +55,7 @@ class ViewEventConsumerTest {
 
         @DisplayName("PRODUCT_VIEWED가 아닌 이벤트(LIKE_ADDED)는, 서비스를 호출하지 않고 ack로 흘려보낸다.")
         @Test
-        void skipsAndAcks_whenNotProductViewed() {
+        void skipsAndAcks_whenNotProductViewed() throws Exception {
             // arrange
             String value = "{\"eventType\":\"LIKE_ADDED\",\"productId\":1}";
 
@@ -66,18 +67,18 @@ class ViewEventConsumerTest {
             verify(ack).acknowledge();
         }
 
-        @DisplayName("집계 서비스가 예외를 던지면, ack하지 않아 재시도를 유도한다.")
+        @DisplayName("집계 서비스가 예외를 던지면, 예외를 전파하고 ack하지 않는다 (ErrorHandler가 재시도/DLT 처리).")
         @Test
-        void doesNotAck_whenServiceThrows() {
+        void propagatesAndDoesNotAck_whenServiceThrows() {
             // arrange
             String value = "{\"eventType\":\"PRODUCT_VIEWED\",\"productId\":1,\"occurredAt\":1000}";
             doThrow(new RuntimeException("DB down"))
                 .when(viewAggregatorService).handleProductViewed(any(), anyLong(), anyLong());
 
-            // act
-            consumer.onMessage(record(value), ack);
-
-            // assert
+            // act & assert
+            assertThatThrownBy(() -> consumer.onMessage(record(value), ack))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("DB down");
             verify(ack, never()).acknowledge();
         }
     }

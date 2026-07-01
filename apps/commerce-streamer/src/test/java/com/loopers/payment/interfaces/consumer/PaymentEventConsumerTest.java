@@ -14,6 +14,7 @@ import org.springframework.kafka.support.Acknowledgment;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -44,7 +45,7 @@ class PaymentEventConsumerTest {
 
         @DisplayName("ORDER_CONFIRMED를 수신하면, items를 파싱해 집계 서비스를 호출하고 ack한다.")
         @Test
-        void callsServiceAndAcks_whenOrderConfirmed() {
+        void callsServiceAndAcks_whenOrderConfirmed() throws Exception {
             // arrange
             String value = """
                 {"eventType":"ORDER_CONFIRMED","orderId":123,
@@ -66,7 +67,7 @@ class PaymentEventConsumerTest {
 
         @DisplayName("알 수 없는 eventType이면, 집계 서비스를 호출하지 않고 ack로 메시지를 흘려보낸다.")
         @Test
-        void skipsAndAcks_whenUnknownEventType() {
+        void skipsAndAcks_whenUnknownEventType() throws Exception {
             // arrange
             String value = "{\"eventType\":\"ORDER_CANCELLED\",\"orderId\":123,\"items\":[]}";
 
@@ -78,18 +79,18 @@ class PaymentEventConsumerTest {
             verify(ack).acknowledge();
         }
 
-        @DisplayName("집계 서비스가 예외를 던지면, ack하지 않아 재시도를 유도한다.")
+        @DisplayName("집계 서비스가 예외를 던지면, 예외를 전파하고 ack하지 않는다 (ErrorHandler가 재시도/DLT 처리).")
         @Test
-        void doesNotAck_whenServiceThrows() {
+        void propagatesAndDoesNotAck_whenServiceThrows() {
             // arrange
             String value = "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":123,\"items\":[{\"productId\":1,\"quantity\":2}]}";
             doThrow(new RuntimeException("DB down"))
                 .when(salesAggregatorService).handleOrderConfirmed(any(), any());
 
-            // act
-            consumer.onMessage(record(value), ack);
-
-            // assert
+            // act & assert
+            assertThatThrownBy(() -> consumer.onMessage(record(value), ack))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessage("DB down");
             verify(ack, never()).acknowledge();
         }
     }
