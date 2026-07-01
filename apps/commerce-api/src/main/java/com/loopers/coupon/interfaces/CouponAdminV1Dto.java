@@ -9,14 +9,15 @@ import java.time.ZonedDateTime;
 
 public class CouponAdminV1Dto {
 
-    public record CreateRequest(String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt) {}
+    public record CreateRequest(String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt, Integer maxCount) {}
 
     public record UpdateRequest(String name, Long value, Long minOrderAmount, ZonedDateTime expiredAt) {}
 
-    public record CouponResponse(Long id, String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt) {
+    public record CouponResponse(Long id, String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt, Integer maxCount, Integer remainingCount) {
         public static CouponResponse from(CouponInfo info) {
             return new CouponResponse(
-                info.id(), info.name(), info.type(), info.value(), info.minOrderAmount(), info.expiredAt()
+                info.id(), info.name(), info.type(), info.value(), info.minOrderAmount(), info.expiredAt(),
+                info.maxCount(), info.remainingCount()
             );
         }
     }

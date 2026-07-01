@@ -9,4 +9,5 @@ public interface CouponRepository {
     Optional<CouponModel> findById(Long id);
     List<CouponModel> findAllActive(int page, int size);
     List<CouponModel> findAllByIds(List<Long> ids);
+    int decrementRemainingCount(Long couponId);
 }

@@ -30,15 +30,27 @@ public class CouponModel extends BaseEntity {
     @Column(name = "expired_at")
     private ZonedDateTime expiredAt;
 
+    @Column(name = "max_count")
+    private Integer maxCount;
+
+    @Column(name = "remaining_count")
+    private Integer remainingCount;
+
     protected CouponModel() {}
 
     public CouponModel(String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt) {
+        this(name, type, value, minOrderAmount, expiredAt, null);
+    }
+
+    public CouponModel(String name, CouponType type, Long value, Long minOrderAmount, ZonedDateTime expiredAt, Integer maxCount) {
         validate(name, type, value, expiredAt);
         this.name = name;
         this.type = type;
         this.value = value;
         this.minOrderAmount = minOrderAmount;
         this.expiredAt = expiredAt;
+        this.maxCount = maxCount;
+        this.remainingCount = maxCount;
     }
 
     public boolean isExpired() {

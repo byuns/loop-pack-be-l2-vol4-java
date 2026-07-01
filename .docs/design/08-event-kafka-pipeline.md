@@ -272,23 +272,166 @@ lastViewEventAt = occurredAt;
 
 ## 쿠폰 (선착순 발급)
 
-### 현재 문제
+### 왜 Kafka인가
 
-`CouponFacade.issueCoupon()` 동기 TX → 동시 요청 시 DB 락 경합, 수량 제한 없음
+기존 `issueCoupon()`은 동기 TX 안에서 발급까지 완료한다. 선착순 100장에 1만 명이 동시 요청하면 DB row lock이 직렬화 지점이 되고 대부분의 요청이 lock wait로 쌓인다. DB가 병목이다.
 
-### 변경 흐름 — 미구현
+Kafka `couponId` 파티션 키를 쓰면 같은 쿠폰에 대한 요청이 단일 파티션에서 직렬로 처리된다. API는 Outbox INSERT만 하고 202를 돌려주므로 응답이 빠르고, Consumer가 순서대로 처리하므로 DB 경합이 없다.
+
+단, "발급됐나요?"는 즉시 알 수 없다. 결과를 polling으로 확인해야 한다. 이것이 이 방식의 핵심 트레이드오프다.
+
+### API 흐름
 
 ```
-POST /api/v1/coupons/{couponId}/issue  →  Kafka 발행만  →  202 Accepted
-GET  /api/v1/coupons/{couponId}/issue/status  →  PENDING / ISSUED / FAILED
+POST /api/v1/coupons/{couponId}/issue
+  → 만료 체크 + 중복 요청 체크
+  → coupon_issue_requests(PENDING) INSERT
+  → outbox_events INSERT
+  → 202 Accepted + { requestId, status: PENDING }
+
+GET /api/v1/coupons/issue-requests/{requestId}
+  → { requestId, couponId, userId, status: PENDING | ISSUED | FAILED }
 ```
 
-Consumer가 `couponId` 파티션 키 덕분에 같은 쿠폰 요청을 직렬로 처리 → 수량 초과 방지
+### 신규 테이블 — `coupon_issue_requests`
 
-**신규 파일**
-- `coupon_issue_requests` 테이블 (status: PENDING / ISSUED / FAILED)
-- `CouponFacade.requestCouponIssue()` — 만료 여부만 확인 후 Kafka 발행
-- `CouponIssueConsumer.java` — 수량 제한 + 중복 방지 + manual Ack
+```sql
+coupon_issue_requests (
+  id PK,
+  coupon_id, user_id,
+  status ENUM('PENDING', 'ISSUED', 'FAILED'),
+  UNIQUE (coupon_id, user_id)
+)
+```
+
+UNIQUE 제약이 두 가지 일을 한다:
+1. **DB 수준 중복 차단** — 같은 (couponId, userId) 조합의 두 번째 INSERT를 막는다.
+2. **상태의 단일 진실점** — 한 유저가 한 쿠폰에 대해 갖는 요청이 반드시 하나뿐임을 보장한다.
+
+기존 `coupon_issues`에도 UNIQUE(coupon_id, user_id)가 있다. 둘은 역할이 다르다 — `coupon_issue_requests`는 "요청 추적"이고, `coupon_issues`는 "발급 완료 사실"이다.
+
+### Outbox payload
+
+```json
+{
+  "requestId": 123,
+  "couponId": 456,
+  "userId": 789,
+  "eventType": "COUPON_ISSUE_REQUESTED"
+}
+```
+
+**토픽:** `coupon-issue-requests` / Partition Key: `couponId`
+
+`couponId` 파티션 키 → 같은 쿠폰 요청이 단일 파티션에서 순서대로 처리 → Consumer 직렬화 보장.
+
+### Consumer 처리 흐름
+
+```
+1. Kafka 메시지 수신 (requestId, couponId, userId)
+2. @Transactional 내부:
+   a. coupon_issue_requests.status == PENDING?
+      → No (이미 ISSUED or FAILED) : return  ← 멱등성
+   b. coupon_issues에 (couponId, userId) 이미 있나?
+      → Yes : status = FAILED, save, return  ← 중복 차단
+   c. UPDATE coupons SET remaining_count = remaining_count - 1
+      WHERE id = couponId AND remaining_count > 0
+      → 0건 업데이트 : status = FAILED, save, return  ← 수량 소진
+   d. coupon_issues INSERT (AVAILABLE)
+   e. coupon_issue_requests.status = ISSUED, save
+3. ack.acknowledge()
+```
+
+모든 상태 전이가 하나의 `@Transactional` 안에 있다. 중간에 실패하면 전부 롤백되고 status는 PENDING 그대로 → Kafka가 재시도한다.
+
+### 수량 제한 — 원자 감소
+
+```sql
+UPDATE coupons
+SET remaining_count = remaining_count - 1, updated_at = NOW()
+WHERE id = :couponId AND remaining_count > 0
+```
+
+반환된 업데이트 행 수가 0이면 수량 소진. DB가 읽기-수정-쓰기를 단일 쿼리로 처리해 동시 업데이트에도 lost update가 없다.
+
+**다른 선택지와 비교**
+
+| 방식 | 설명 | 문제 |
+|---|---|---|
+| A: 파티션 직렬화만 믿기 | Consumer가 단일 파티션에서 처리하니 동시성 없음 | Consumer 여러 인스턴스 → 파티션 분산 → 같은 쿠폰이 다른 파티션에 갈 수 없지만, 파티션이 재할당되는 리밸런싱 순간에 두 Consumer가 잠깐 같은 파티션에서 처리할 수 있는 엣지 케이스 존재 |
+| **B: DB 원자 감소 (현재)** | SQL 한 줄이 수량 소진 여부를 결정 | 없음. DB 레벨 보장 |
+| C: Redis 카운터 | `DECR coupon:{id}:count` 원자 | DB와 Redis 간 정합성 관리 필요. 장애 시 두 값이 달라질 수 있음 |
+
+파티션 직렬화로도 거의 충분하지만, **"거의"를 믿지 않는다**는 것이 B 선택의 이유다. DB 레벨이 최후 방어선이다.
+
+### 멱등성 설계
+
+| 키 | 방식 | 이유 |
+|---|---|---|
+| Kafka 메시지 중복 | `coupon_issue_requests.status` 체크 | requestId 기반. PENDING이 아니면 이미 처리됨 |
+| 중복 발급 요청 | `coupon_issues` EXISTS 체크 | Consumer에서 두 번째 안전망 |
+
+`event_handled` 테이블을 쓰지 않은 이유: 이 파이프라인에서 멱등 키는 `requestId`이고, 요청 1개당 레코드 1개인 `coupon_issue_requests`가 이미 상태 기계 역할을 한다. 별도 테이블을 추가하면 한 요청에 두 테이블을 동시에 보고해야 해서 오히려 복잡해진다.
+
+### 실패 처리 — 비즈니스 실패 vs 시스템 실패
+
+| 종류 | 상황 | 처리 |
+|---|---|---|
+| 비즈니스 실패 | 수량 소진, 중복 요청 | status = FAILED, ack → Kafka에서 메시지 제거 |
+| 시스템 실패 | DB 다운, 네트워크 오류 | 예외 전파, ack 안 함 → Kafka 재시도 |
+
+비즈니스 실패를 FAILED로 확정하고 ack하는 이유: **선착순이기 때문이다.** 수량이 소진됐는데 재시도해봐야 결과가 바뀌지 않는다. FAILED를 재시도 불가 상태로 확정하고 사용자가 `GET /issue-requests/{requestId}`로 확인하게 한다.
+
+PENDING/ISSUED/FAILED 모두 API 사전 차단 대상에 포함한 이유도 같다. FAILED인 사람이 다시 요청해도 이미 선착순에서 탈락한 것이다.
+
+### 재시도 전략
+
+시스템 실패 시 ack 안 함 → 다음 poll에서 재시도. 지수 백오프를 쓰지 않은 이유:
+
+- **지수 백오프 문제**: 같은 파티션의 다음 메시지가 백오프 동안 막힌다(파티션 블로킹). 선착순 쿠폰에서 A의 처리가 지연되는 동안 B, C, D의 처리도 멈춘다.
+- 고정 간격으로 빠르게 재시도(poll 주기), 일정 횟수 실패하면 DLT로 이관하는 것이 이 도메인에 맞다.
+
+현재는 무한 재시도(DLT 미구현). `coupon-issue-requests.DLT` 리스너는 로깅용으로 구성했고, 실제 DLT 라우팅은 `DefaultErrorHandler + FixedBackOff` 설정이 필요하다.
+
+### API 사전 차단(이중 방어)
+
+```
+API (requestCouponIssue)         Consumer (handleCouponIssueRequest)
+       ↓                                    ↓
+  중복 요청 체크                        중복 발급 체크
+  (coupon_issue_requests 조회)          (coupon_issues 조회)
+       ↓                                    ↓
+  만료 체크                          remaining_count 원자 감소
+       ↓
+  Outbox INSERT
+```
+
+API 수준 체크는 "이미 요청을 넣은 사람이 중복 요청 보내는 것"을 막는 빠른 방어선이다. Kafka 메시지를 쌓이기 전에 걸러낸다. Consumer 수준 체크는 Kafka 재시도나 기타 이유로 같은 메시지가 두 번 처리될 때의 안전망이다.
+
+### 처리 순서 — 왜 이 순서인가
+
+```
+중복 체크 → remaining_count 감소 → coupon_issues INSERT → status = ISSUED
+```
+
+순서를 바꾸면 어떻게 될까?
+
+- `감소 → 중복 체크`: 중복인데 수량을 깎고 나서 중복 판정. 수량 누수.
+- `감소 → INSERT → 중복 체크`: INSERT가 UNIQUE 위반으로 터지면 감소된 수량을 돌려받지 못함. 수량 누수.
+
+중복 체크가 항상 가장 먼저여야 수량 누수가 없다.
+
+### `coupon_issues` vs `coupon_issue_requests` 분리 이유
+
+두 테이블을 합치지 않은 이유:
+
+| | `coupon_issue_requests` | `coupon_issues` |
+|---|---|---|
+| 소유자 | 요청(비동기 흐름) | 발급 사실(비즈니스 완료) |
+| 주체 | API가 쓰고 Consumer가 업데이트 | Consumer만 씀 |
+| 기존 코드 영향 | 신규 | 주문, 결제 등이 이미 참조 중 |
+
+`coupon_issues`는 "쿠폰이 발급됐다"는 비즈니스 사실이고, `coupon_issue_requests`는 "비동기 발급 요청의 진행 상태"다. 의미가 달라 합치면 기존 코드가 비동기 흐름을 모르는 채로 `coupon_issues`를 읽다가 PENDING 상태를 발급된 것으로 오인할 수 있다.
 
 ---
 
@@ -473,4 +616,4 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 | 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
 | 결제 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
 | 조회수 | ✅ 완료 | ✅ 완료 (Kafka 직접, Outbox 미경유) | ✅ 완료 (Testcontainers 검증) |
-| 쿠폰 | — | — | ⬜ 미구현 |
+| 쿠폰 | — | ✅ 완료 (Outbox) | ✅ 완료 |

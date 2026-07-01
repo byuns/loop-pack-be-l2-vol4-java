@@ -1,8 +1,10 @@
 package com.loopers.coupon.interfaces;
 
 import com.loopers.coupon.application.CouponFacade;
-import com.loopers.coupon.domain.CouponStatus;
+import com.loopers.coupon.domain.CouponIssueRequestStatus;
 import com.loopers.coupon.domain.CouponType;
+import com.loopers.coupon.infrastructure.CouponIssueJpaRepository;
+import com.loopers.coupon.domain.CouponIssueModel;
 import com.loopers.support.response.ApiResponse;
 import com.loopers.user.domain.Gender;
 import com.loopers.user.interfaces.UserV1Dto;
@@ -39,9 +41,13 @@ class CouponV1ApiE2ETest {
     private CouponFacade couponFacade;
 
     @Autowired
+    private CouponIssueJpaRepository couponIssueJpaRepository;
+
+    @Autowired
     private DatabaseCleanUp databaseCleanUp;
 
     private HttpHeaders authHeaders;
+    private Long userId;
 
     @BeforeEach
     void setUp() {
@@ -53,6 +59,12 @@ class CouponV1ApiE2ETest {
         authHeaders = new HttpHeaders();
         authHeaders.set("X-Loopers-LoginId", "testuser");
         authHeaders.set("X-Loopers-LoginPw", "Pass123!");
+
+        var meResponse = testRestTemplate.exchange(
+            "/api/v1/users/me", HttpMethod.GET, new HttpEntity<>(authHeaders),
+            new ParameterizedTypeReference<ApiResponse<UserV1Dto.UserResponse>>() {}
+        );
+        userId = meResponse.getBody().data().id();
     }
 
     @AfterEach
@@ -64,16 +76,16 @@ class CouponV1ApiE2ETest {
     @Nested
     class IssueCoupon {
 
-        @DisplayName("정상 요청이면, 200 OK와 AVAILABLE 상태의 CouponIssueResponse를 반환한다.")
+        @DisplayName("선착순 쿠폰에 정상 요청이면, 202 Accepted와 PENDING 상태의 CouponIssueRequestResponse를 반환한다.")
         @Test
-        void returnsCouponIssueResponse_withAvailableStatus_whenRequestIsValid() {
+        void returnsCouponIssueRequestResponse_withPendingStatus_whenRequestIsValid() {
             // arrange
-            var coupon = couponFacade.createCoupon("할인 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
+            var coupon = couponFacade.createCoupon("선착순 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30), 100);
 
             // act
-            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueResponse>> responseType =
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
                 new ParameterizedTypeReference<>() {};
-            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueResponse>> response =
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
                 testRestTemplate.exchange(
                     "/api/v1/coupons/" + coupon.id() + "/issue",
                     HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
@@ -81,9 +93,9 @@ class CouponV1ApiE2ETest {
 
             // assert
             assertAll(
-                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED),
                 () -> assertThat(response.getBody().data().couponId()).isEqualTo(coupon.id()),
-                () -> assertThat(response.getBody().data().status()).isEqualTo(CouponStatus.AVAILABLE)
+                () -> assertThat(response.getBody().data().status()).isEqualTo(CouponIssueRequestStatus.PENDING)
             );
         }
 
@@ -91,9 +103,9 @@ class CouponV1ApiE2ETest {
         @Test
         void returnsNotFound_whenCouponNotExists() {
             // act
-            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueResponse>> responseType =
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
                 new ParameterizedTypeReference<>() {};
-            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueResponse>> response =
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
                 testRestTemplate.exchange(
                     "/api/v1/coupons/999/issue",
                     HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
@@ -103,20 +115,20 @@ class CouponV1ApiE2ETest {
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         }
 
-        @DisplayName("이미 발급받은 쿠폰을 재요청하면, 409 Conflict를 반환한다.")
+        @DisplayName("이미 발급 요청이 존재하는 쿠폰에 재요청하면, 409 Conflict를 반환한다.")
         @Test
-        void returnsConflict_whenCouponAlreadyIssued() {
+        void returnsConflict_whenIssueRequestAlreadyExists() {
             // arrange
-            var coupon = couponFacade.createCoupon("할인 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
+            var coupon = couponFacade.createCoupon("선착순 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30), 100);
             testRestTemplate.exchange(
                 "/api/v1/coupons/" + coupon.id() + "/issue",
                 HttpMethod.POST, new HttpEntity<>(authHeaders), Void.class
             );
 
             // act
-            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueResponse>> responseType =
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
                 new ParameterizedTypeReference<>() {};
-            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueResponse>> response =
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
                 testRestTemplate.exchange(
                     "/api/v1/coupons/" + coupon.id() + "/issue",
                     HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
@@ -130,12 +142,31 @@ class CouponV1ApiE2ETest {
         @Test
         void returnsBadRequest_whenCouponIsExpired() {
             // arrange
-            var coupon = couponFacade.createCoupon("만료 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().minusDays(1));
+            var coupon = couponFacade.createCoupon("만료 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().minusDays(1), 100);
 
             // act
-            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueResponse>> responseType =
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
                 new ParameterizedTypeReference<>() {};
-            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueResponse>> response =
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
+                testRestTemplate.exchange(
+                    "/api/v1/coupons/" + coupon.id() + "/issue",
+                    HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
+                );
+
+            // assert
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+
+        @DisplayName("선착순 쿠폰이 아니면(maxCount 없음), 400 Bad Request를 반환한다.")
+        @Test
+        void returnsBadRequest_whenCouponHasNoMaxCount() {
+            // arrange
+            var coupon = couponFacade.createCoupon("일반 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
+
+            // act
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
+                new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
                 testRestTemplate.exchange(
                     "/api/v1/coupons/" + coupon.id() + "/issue",
                     HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
@@ -146,6 +177,55 @@ class CouponV1ApiE2ETest {
         }
     }
 
+    @DisplayName("GET /api/v1/coupons/issue-requests/{requestId}")
+    @Nested
+    class GetIssueRequestStatus {
+
+        @DisplayName("본인의 발급 요청 조회이면, 200 OK와 요청 상태를 반환한다.")
+        @Test
+        void returnsIssueRequestStatus_whenOwnRequest() {
+            // arrange
+            var coupon = couponFacade.createCoupon("선착순 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30), 100);
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
+                new ParameterizedTypeReference<>() {};
+            var issueResponse = testRestTemplate.exchange(
+                "/api/v1/coupons/" + coupon.id() + "/issue",
+                HttpMethod.POST, new HttpEntity<>(authHeaders), responseType
+            );
+            Long requestId = issueResponse.getBody().data().requestId();
+
+            // act
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
+                testRestTemplate.exchange(
+                    "/api/v1/coupons/issue-requests/" + requestId,
+                    HttpMethod.GET, new HttpEntity<>(authHeaders), responseType
+                );
+
+            // assert
+            assertAll(
+                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getBody().data().requestId()).isEqualTo(requestId),
+                () -> assertThat(response.getBody().data().couponId()).isEqualTo(coupon.id())
+            );
+        }
+
+        @DisplayName("존재하지 않는 요청 ID이면, 404 Not Found를 반환한다.")
+        @Test
+        void returnsNotFound_whenRequestNotExists() {
+            // act
+            ParameterizedTypeReference<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> responseType =
+                new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<CouponV1Dto.CouponIssueRequestResponse>> response =
+                testRestTemplate.exchange(
+                    "/api/v1/coupons/issue-requests/999",
+                    HttpMethod.GET, new HttpEntity<>(authHeaders), responseType
+                );
+
+            // assert
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        }
+    }
+
     @DisplayName("GET /api/v1/users/me/coupons")
     @Nested
     class GetMyCoupons {
@@ -153,12 +233,9 @@ class CouponV1ApiE2ETest {
         @DisplayName("발급된 쿠폰이 있으면, 200 OK와 내 쿠폰 목록을 반환한다.")
         @Test
         void returnsCouponIssueList_whenCouponsExist() {
-            // arrange
+            // arrange — 발급 요청이 Consumer에 의해 처리된 결과(coupon_issues)를 직접 삽입
             var coupon = couponFacade.createCoupon("할인 쿠폰", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30));
-            testRestTemplate.exchange(
-                "/api/v1/coupons/" + coupon.id() + "/issue",
-                HttpMethod.POST, new HttpEntity<>(authHeaders), Void.class
-            );
+            couponIssueJpaRepository.save(new CouponIssueModel(coupon.id(), userId));
 
             // act
             ParameterizedTypeReference<ApiResponse<List<CouponV1Dto.CouponIssueResponse>>> responseType =
