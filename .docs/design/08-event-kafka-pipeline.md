@@ -133,15 +133,15 @@ AFTER_COMMIT 리스너에서 DB를 써야 할 때(REQUIRES_NEW) 새 커넥션이
    b. event_handled INSERT
    c. product_metrics.like_count +1 (없으면 새로 생성)
 4. ack.acknowledge() → offset commit
-5. 처리 실패 → ack 안 함 → 다음 poll에서 재시도
 ```
 
 **Consumer group:** `like-aggregator` (인스턴스를 늘리면 partition 분담, 최대 3개까지)
 
-**알려진 한계**
+시스템 실패는 전역 DLT 정책(공통 — 실패 처리 참조)이 3회 재시도 후 `catalog-events.DLT`로 격리한다.
+
+### 알려진 한계
 
 - **중복 발행 감지 한계**: Poller가 발행 성공 후 `published_at` 갱신 전 크래시하면, 재시작 시 같은 이벤트가 새 (partition, offset)으로 재발행된다. eventId가 좌표 기반이라 이 경우 중복 감지 불가. 해결책: outbox.id를 Kafka header로 넘겨 Consumer가 eventId로 사용.
-- ~~**DLT 미구현**~~ → **DLT 적용됨** (아래 "실패 처리 — 전역 DLT 정책" 참조)
 
 ---
 
@@ -187,7 +187,6 @@ payload에 items 배열을 포함해 Consumer가 추가 API 호출 없이 집계
    b. event_handled INSERT
    c. items 순회: incrementSalesCount(productId, quantity) ← 원자 UPSERT
 4. ack.acknowledge() → offset commit
-5. 처리 실패 → ack 안 함 → 다음 poll에서 재시도
 ```
 
 **Consumer group:** `sales-aggregator`
@@ -210,28 +209,9 @@ payload에 items 배열을 포함해 Consumer가 추가 API 호출 없이 집계
 
 결제는 주문당 ORDER_CONFIRMED가 평생 1번뿐이라 `"order:" + orderId`를 멱등 키로 쓴다. Outbox 재발행이나 리밸런싱으로 Kafka 좌표가 바뀌어도 orderId가 같으면 중복을 정확히 잡는다. 좋아요의 "Producer 재시작 후 중복" 한계를 구조적으로 피한 것.
 
-**알려진 한계**
+### 알려진 한계
 
-- ~~DLT 미구현~~ → **DLT 적용됨** (전역 정책 섹션 참조)
 - 취소/환불 시 `sales_count` 감소 경로 없음 → 현재는 "확정 누적"이며 "순매출"이 아님
-
-### 통합 검증 (Testcontainers)
-
-`EventConsumerIntegrationTest.java`에서 실제 Kafka(`apache/kafka:3.8.1`) + MySQL로 검증:
-
-- `LIKE_ADDED` 발행 → `like_count == 1`, `event_handled` 1건
-- `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 키 `"order:{id}"` 1건
-- 같은 orderId `ORDER_CONFIRMED` 2회 발행 → `sales_count` 1회만 반영 (멱등 확인)
-
-**검증 중 발견한 버그 — 이중 직렬화**
-
-Producer `value-serializer`가 `JsonSerializer`였는데, Outbox payload는 이미 ObjectMapper로 직렬화된 **JSON 문자열**이다. JsonSerializer가 이 문자열을 한 번 더 직렬화해 바깥에 따옴표가 덧씌워진 채 발행됐다.
-
-Consumer가 `StringDeserializer`로 받아 파싱하면 JSON 객체가 아니라 **문자열 리터럴**로 읽혀 `.get("eventType")`이 null → NPE → ack 안 됨 → lag 무한 누적.
-
-→ `kafka.yml` producer를 `JsonSerializer` → `StringSerializer`로 수정.
-
-> Producer와 Consumer의 직렬화 방식은 항상 짝을 맞춰야 한다. payload를 코드에서 직접 문자열로 만들면 String 계열, 객체를 그대로 넘기면 Json 계열이어야 한다. 섞이면 이중 인코딩이 조용히 발생한다.
 
 ---
 
@@ -293,7 +273,9 @@ GET /api/v1/coupons/issue-requests/{requestId}
   → { requestId, couponId, userId, status: PENDING | ISSUED | FAILED }
 ```
 
-### 신규 테이블 — `coupon_issue_requests`
+### 데이터 모델 — 두 테이블 분리
+
+**`coupon_issue_requests` (신규)**
 
 ```sql
 coupon_issue_requests (
@@ -308,7 +290,15 @@ UNIQUE 제약이 두 가지 일을 한다:
 1. **DB 수준 중복 차단** — 같은 (couponId, userId) 조합의 두 번째 INSERT를 막는다.
 2. **상태의 단일 진실점** — 한 유저가 한 쿠폰에 대해 갖는 요청이 반드시 하나뿐임을 보장한다.
 
-기존 `coupon_issues`에도 UNIQUE(coupon_id, user_id)가 있다. 둘은 역할이 다르다 — `coupon_issue_requests`는 "요청 추적"이고, `coupon_issues`는 "발급 완료 사실"이다.
+**`coupon_issues`와 합치지 않은 이유**
+
+| | `coupon_issue_requests` | `coupon_issues` |
+|---|---|---|
+| 소유자 | 요청(비동기 흐름) | 발급 사실(비즈니스 완료) |
+| 주체 | API가 쓰고 Consumer가 업데이트 | Consumer만 씀 |
+| 기존 코드 영향 | 신규 | 주문, 결제 등이 이미 참조 중 |
+
+`coupon_issues`는 "쿠폰이 발급됐다"는 비즈니스 사실이고, `coupon_issue_requests`는 "비동기 발급 요청의 진행 상태"다. 의미가 달라 합치면 기존 코드가 비동기 흐름을 모르는 채로 `coupon_issues`를 읽다가 PENDING 상태를 발급된 것으로 오인할 수 있다.
 
 ### Outbox payload
 
@@ -344,7 +334,9 @@ UNIQUE 제약이 두 가지 일을 한다:
 
 모든 상태 전이가 하나의 `@Transactional` 안에 있다. 중간에 실패하면 전부 롤백되고 status는 PENDING 그대로 → Kafka가 재시도한다.
 
-### 수량 제한 — 원자 감소
+### 동시성과 멱등 설계
+
+**1. 수량 제한 — DB 원자 감소**
 
 ```sql
 UPDATE coupons
@@ -354,17 +346,15 @@ WHERE id = :couponId AND remaining_count > 0
 
 반환된 업데이트 행 수가 0이면 수량 소진. DB가 읽기-수정-쓰기를 단일 쿼리로 처리해 동시 업데이트에도 lost update가 없다.
 
-**다른 선택지와 비교**
-
 | 방식 | 설명 | 문제 |
 |---|---|---|
-| A: 파티션 직렬화만 믿기 | Consumer가 단일 파티션에서 처리하니 동시성 없음 | Consumer 여러 인스턴스 → 파티션 분산 → 같은 쿠폰이 다른 파티션에 갈 수 없지만, 파티션이 재할당되는 리밸런싱 순간에 두 Consumer가 잠깐 같은 파티션에서 처리할 수 있는 엣지 케이스 존재 |
+| A: 파티션 직렬화만 믿기 | Consumer가 단일 파티션에서 처리하니 동시성 없음 | 리밸런싱 순간에 두 Consumer가 잠깐 같은 파티션에서 처리할 수 있는 엣지 케이스 존재 |
 | **B: DB 원자 감소 (현재)** | SQL 한 줄이 수량 소진 여부를 결정 | 없음. DB 레벨 보장 |
 | C: Redis 카운터 | `DECR coupon:{id}:count` 원자 | DB와 Redis 간 정합성 관리 필요. 장애 시 두 값이 달라질 수 있음 |
 
 파티션 직렬화로도 거의 충분하지만, **"거의"를 믿지 않는다**는 것이 B 선택의 이유다. DB 레벨이 최후 방어선이다.
 
-### 멱등성 설계
+**2. 멱등 키**
 
 | 키 | 방식 | 이유 |
 |---|---|---|
@@ -373,25 +363,7 @@ WHERE id = :couponId AND remaining_count > 0
 
 `event_handled` 테이블을 쓰지 않은 이유: 이 파이프라인에서 멱등 키는 `requestId`이고, 요청 1개당 레코드 1개인 `coupon_issue_requests`가 이미 상태 기계 역할을 한다. 별도 테이블을 추가하면 한 요청에 두 테이블을 동시에 보고해야 해서 오히려 복잡해진다.
 
-### 실패 처리 — 비즈니스 실패 vs 시스템 실패
-
-| 종류 | 상황 | 처리 |
-|---|---|---|
-| 비즈니스 실패 | 수량 소진, 중복 요청 | status = FAILED, ack → Kafka에서 메시지 제거 |
-| 시스템 실패 | DB 다운, 네트워크 오류 | 예외 전파, ack 안 함 → Kafka 재시도 |
-
-비즈니스 실패를 FAILED로 확정하고 ack하는 이유: **선착순이기 때문이다.** 수량이 소진됐는데 재시도해봐야 결과가 바뀌지 않는다. FAILED를 재시도 불가 상태로 확정하고 사용자가 `GET /issue-requests/{requestId}`로 확인하게 한다.
-
-PENDING/ISSUED/FAILED 모두 API 사전 차단 대상에 포함한 이유도 같다. FAILED인 사람이 다시 요청해도 이미 선착순에서 탈락한 것이다.
-
-### 재시도 전략 — FixedBackOff + DLT
-
-전역 정책(아래 "실패 처리 — 전역 DLT 정책" 섹션)을 그대로 따른다. 쿠폰 도메인의 특수 사항:
-
-- **비즈니스 실패는 DLT로 가지 않는다.** 수량 소진/중복 요청은 서비스가 status=FAILED로 마킹하고 정상 반환 → ack. DLT에 도착하는 건 오직 시스템 예외(DB 다운 등).
-- **선착순 시나리오와 FixedBackOff의 궁합**: A의 재시도(총 3초)가 뒤따르는 B, C, D를 밀지만, 지수 백오프의 십수 초 지연보다 훨씬 짧아 대기 유저 체감 지연이 작다. 3초 후 DLT로 옮겨 파티션을 해방하는 게 선착순 도메인에 맞다.
-
-### API 사전 차단(이중 방어)
+**3. 이중 방어 — API 사전 차단 + Consumer 안전망**
 
 ```
 API (requestCouponIssue)         Consumer (handleCouponIssueRequest)
@@ -404,9 +376,9 @@ API (requestCouponIssue)         Consumer (handleCouponIssueRequest)
   Outbox INSERT
 ```
 
-API 수준 체크는 "이미 요청을 넣은 사람이 중복 요청 보내는 것"을 막는 빠른 방어선이다. Kafka 메시지를 쌓이기 전에 걸러낸다. Consumer 수준 체크는 Kafka 재시도나 기타 이유로 같은 메시지가 두 번 처리될 때의 안전망이다.
+API 수준 체크는 "이미 요청을 넣은 사람이 중복 요청 보내는 것"을 막는 빠른 방어선이다. Kafka 메시지가 쌓이기 전에 걸러낸다. Consumer 수준 체크는 Kafka 재시도나 기타 이유로 같은 메시지가 두 번 처리될 때의 안전망이다.
 
-### 처리 순서 — 왜 이 순서인가
+**4. 처리 순서 — 왜 이 순서인가**
 
 ```
 중복 체크 → remaining_count 감소 → coupon_issues INSERT → status = ISSUED
@@ -419,83 +391,18 @@ API 수준 체크는 "이미 요청을 넣은 사람이 중복 요청 보내는 
 
 중복 체크가 항상 가장 먼저여야 수량 누수가 없다.
 
-### `coupon_issues` vs `coupon_issue_requests` 분리 이유
+### 실패 처리 — 선착순 특수 사항
 
-두 테이블을 합치지 않은 이유:
+전역 DLT 정책(공통 — 실패 처리 참조)이 기본이고, 선착순 도메인의 특수 사항만 여기에 남긴다.
 
-| | `coupon_issue_requests` | `coupon_issues` |
+| 종류 | 상황 | 처리 |
 |---|---|---|
-| 소유자 | 요청(비동기 흐름) | 발급 사실(비즈니스 완료) |
-| 주체 | API가 쓰고 Consumer가 업데이트 | Consumer만 씀 |
-| 기존 코드 영향 | 신규 | 주문, 결제 등이 이미 참조 중 |
+| 비즈니스 실패 | 수량 소진, 중복 요청 | status = FAILED, ack → Kafka에서 메시지 제거. **DLT로 안 감** |
+| 시스템 실패 | DB 다운, 네트워크 오류 | 예외 전파 → 전역 정책 (1초 3회 재시도 후 DLT) |
 
-`coupon_issues`는 "쿠폰이 발급됐다"는 비즈니스 사실이고, `coupon_issue_requests`는 "비동기 발급 요청의 진행 상태"다. 의미가 달라 합치면 기존 코드가 비동기 흐름을 모르는 채로 `coupon_issues`를 읽다가 PENDING 상태를 발급된 것으로 오인할 수 있다.
+**비즈니스 실패를 FAILED로 확정하고 ack하는 이유:** 선착순이기 때문이다. 수량이 소진됐는데 재시도해봐야 결과가 바뀌지 않는다. FAILED를 재시도 불가 상태로 확정하고 사용자가 `GET /issue-requests/{requestId}`로 확인하게 한다. PENDING/ISSUED/FAILED 모두 API 사전 차단 대상에 포함한 이유도 같다 — FAILED인 사람이 다시 요청해도 이미 선착순에서 탈락한 것이다.
 
----
-
-## 실패 처리 — 전역 DLT 정책
-
-### 커버리지
-
-```
-API/Producer         Broker              Consumer
-    ↓                  ↓                    ↓
-[발행 실패]        [브로커 장애]        [처리 실패]
-    ↑                                      ↑
-  Outbox 담당                            DLT 담당
-```
-
-| 지점 | 예시 | 잡히는 곳 | 결과 |
-|---|---|---|---|
-| **Producer → Broker 발행 실패** | 브로커 다운, ISR 부족 | Outbox 패턴 | `outbox_events.published_at = NULL`로 남고 Poller가 재시도. **DLT로 안 감** |
-| **Consumer 처리 실패 (시스템)** | DB 다운, 파싱 실패, 코드 버그 | `DefaultErrorHandler + DeadLetterPublishingRecoverer` | 1초 간격 3회 재시도 후 `.DLT` 이관 |
-| **Consumer 처리 실패 (비즈니스)** | 수량 소진, 중복 요청 | Service가 정상 반환 | ack. DLT로 안 감 |
-| **Broker → Consumer 전달 실패** | Consumer가 브로커 못 잡음 | Kafka 클라이언트 내부 재시도 | 앱 코드는 관여 안 함 |
-
-### 공통 설정
-
-`support/kafka/DltKafkaConfig.java`에 전역 팩토리 정의:
-
-```java
-@Bean(DLT_LISTENER_FACTORY)
-ConcurrentKafkaListenerContainerFactory<Object, Object> dltListenerContainerFactory(...) {
-    factory.getContainerProperties().setAckMode(MANUAL);
-    factory.setCommonErrorHandler(new DefaultErrorHandler(
-        new DeadLetterPublishingRecoverer(kafkaTemplate),
-        new FixedBackOff(1000L, 3L)
-    ));
-}
-```
-
-모든 컨슈머(`CouponIssueConsumer`, `LikeEventConsumer`, `PaymentEventConsumer`, `ViewEventConsumer`)가 `containerFactory = DLT_LISTENER_FACTORY`로 지정해 재사용한다.
-
-### DLT 토픽 (명시 선언)
-
-`auto.create.topics.enable=false`이므로 각 DLT를 `NewTopic` 빈으로 선언:
-
-| 원본 토픽 | DLT 토픽 | 사용 컨슈머 |
-|---|---|---|
-| `catalog-events` | `catalog-events.DLT` | Like + View (fan-out) |
-| `order-events` | `order-events.DLT` | Payment |
-| `coupon-issue-requests` | `coupon-issue-requests.DLT` | Coupon |
-
-### FixedBackOff(1s, 3) 선택 이유
-
-| 대안 | 문제 |
-|---|---|
-| ExponentialBackOff | 같은 파티션의 다음 메시지가 백오프 동안 막힌다(파티션 블로킹). 처리량 급감 |
-| 무한 재시도 (기존 no-ack 방식) | 영속 실패 시 파티션이 영원히 잠긴다. lag 무한 누적 |
-| **FixedBackOff(1s, 3) — 채택** | 총 3초 파티션 블록 후 DLT 이관. 짧은 일시 오류는 흡수하고 영속 실패는 격리 |
-
-### 컨슈머별 DLT 리스너
-
-DLT 리스너의 역할은 **관찰**뿐이다 — 자동 재처리는 위험(3회 실패한 걸 되돌리면 무한 루프). 사람이 원인 확인 후 수동 재발행.
-
-- `catalog-events.DLT`: `LikeEventConsumer.onDlt`에서 로깅 (View는 리스너 생략 — 중복 로깅 회피)
-- `order-events.DLT`: `PaymentEventConsumer.onDlt`
-- `coupon-issue-requests.DLT`: `CouponIssueConsumer.onDlt`
-
-운영에서는 이 자리에 알림 훅(Slack/Sentry/Prometheus)을 붙인다.
+**선착순 시나리오와 FixedBackOff의 궁합:** A의 재시도(총 3초)가 뒤따르는 B, C, D를 밀지만, 지수 백오프의 십수 초 지연보다 훨씬 짧아 대기 유저 체감 지연이 작다. 3초 후 DLT로 옮겨 파티션을 해방하는 게 선착순 도메인에 맞다.
 
 ---
 
@@ -636,19 +543,6 @@ poll 후 처리 전 크래시 상황 시뮬레이션:
 
 ---
 
-## 공통 — ApplicationEvent 목록
-
-| 이벤트 | 발행처 | phase | 목적 | 리스너 |
-|---|---|---|---|---|
-| `PaymentConfirmedEvent` | `PaymentFacade.applyPgResult` (SUCCESS) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
-| `PaymentFailedEvent` | `PaymentFacade.applyPgResult` (FAIL) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
-| `OrderCreatedEvent` | `OrderFacade.createOrder` | AFTER_COMMIT | 행동 로그 | `UserActionLogListener` |
-| `ProductViewedEvent` | `ProductFacade.getProduct` | AFTER_COMMIT | 행동 로그 + 조회수 전파 | `UserActionLogListener` · `ProductViewEventPublisher` |
-
-> `PaymentConfirmedEvent`(알림)와 `order-events` Outbox INSERT(집계)는 목적이 달라 같은 SUCCESS 분기에 공존한다 — 하나는 유실 허용(알림), 하나는 유실 불가(집계).
-
----
-
 ## 공통 — Outbox 설계
 
 ### 테이블 구조
@@ -673,6 +567,157 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 
 ---
 
+## 공통 — 실패 처리 (DLT 정책)
+
+### 커버리지
+
+```
+API/Producer         Broker              Consumer
+    ↓                  ↓                    ↓
+[발행 실패]        [브로커 장애]        [처리 실패]
+    ↑                                      ↑
+  Outbox 담당                            DLT 담당
+```
+
+| 지점 | 예시 | 잡히는 곳 | 결과 |
+|---|---|---|---|
+| **Producer → Broker 발행 실패** | 브로커 다운, ISR 부족 | Outbox 패턴 | `outbox_events.published_at = NULL`로 남고 Poller가 재시도. **DLT로 안 감** |
+| **Consumer 처리 실패 (시스템)** | DB 다운, 파싱 실패, 코드 버그 | `DefaultErrorHandler + DeadLetterPublishingRecoverer` | 1초 간격 3회 재시도 후 `.DLT` 이관 |
+| **Consumer 처리 실패 (비즈니스)** | 수량 소진, 중복 요청 | Service가 정상 반환 | ack. DLT로 안 감 |
+| **Broker → Consumer 전달 실패** | Consumer가 브로커 못 잡음 | Kafka 클라이언트 내부 재시도 | 앱 코드는 관여 안 함 |
+
+### 공통 설정
+
+전역 DLT 팩토리 하나를 정의해 모든 컨슈머가 재사용한다.
+
+```java
+@Bean(DLT_LISTENER_FACTORY)
+ConcurrentKafkaListenerContainerFactory<Object, Object> dltListenerContainerFactory(...) {
+    factory.getContainerProperties().setAckMode(MANUAL);
+    factory.setCommonErrorHandler(new DefaultErrorHandler(
+        new DeadLetterPublishingRecoverer(kafkaTemplate),
+        new FixedBackOff(1000L, 3L)
+    ));
+}
+```
+
+### DLT 토픽 (명시 선언)
+
+`auto.create.topics.enable=false`이므로 각 DLT를 `NewTopic` 빈으로 선언:
+
+| 원본 토픽 | DLT 토픽 | 사용 컨슈머 |
+|---|---|---|
+| `catalog-events` | `catalog-events.DLT` | Like + View (fan-out) |
+| `order-events` | `order-events.DLT` | Payment |
+| `coupon-issue-requests` | `coupon-issue-requests.DLT` | Coupon |
+
+### FixedBackOff(1s, 3) 선택 이유
+
+| 대안 | 문제 |
+|---|---|
+| ExponentialBackOff | 같은 파티션의 다음 메시지가 백오프 동안 막힌다(파티션 블로킹). 처리량 급감 |
+| 무한 재시도 (기존 no-ack 방식) | 영속 실패 시 파티션이 영원히 잠긴다. lag 무한 누적 |
+| **FixedBackOff(1s, 3) — 채택** | 총 3초 파티션 블록 후 DLT 이관. 짧은 일시 오류는 흡수하고 영속 실패는 격리 |
+
+### DLT 리스너의 역할
+
+DLT 리스너의 역할은 **관찰**뿐이다 — 자동 재처리는 위험(3회 실패한 걸 되돌리면 무한 루프). 사람이 원인 확인 후 수동 재발행이 안전하다.
+
+각 DLT 토픽마다 리스너를 두고 error 로그로 남긴다. 단, `catalog-events.DLT`는 Like/View 두 컨슈머 그룹이 공유하므로 리스너 하나만 두어 중복 로깅을 피한다.
+
+운영에서는 이 자리에 알림 훅(Slack/Sentry/Prometheus)을 붙인다.
+
+---
+
+## 공통 — Inbox 미도입 판단
+
+Outbox는 도입했지만, 대칭 개념인 **Inbox 패턴은 의도적으로 도입하지 않았다**. 이유를 남긴다.
+
+### Inbox 패턴이란
+
+```
+Message 수신 → inbox_events INSERT (payload 통째로) → 별도 프로세서가 처리
+                    ↑ 여기까지 트랜잭션                      ↑ 별도 트랜잭션
+```
+
+Consumer 측 대칭 패턴. 세 가지 목적:
+
+1. **Durability** — 받자마자 DB에 저장 → 컨슈머 다운돼도 유실 없음
+2. **멱등** — inbox_id를 PK로 두면 중복 처리 방지
+3. **재시도 분리** — 실패해도 inbox에 남아있어 별도 워커가 나중에 재처리
+
+### Kafka + 현재 구성으로 이미 커버되는 이유
+
+| Inbox 목적 | Kafka + 현재 구성의 대체 수단 |
+|---|---|
+| Durability | **Kafka 브로커 자체가 durable log**. offset을 커밋 안 하면 브로커에 남아있음. 컨슈머 재시작 시 커밋 안 된 offset부터 다시 poll |
+| 멱등 | **`event_handled` 테이블** — eventId 기준 중복 감지 (`topic:partition:offset` 좌표 or `"order:{id}"` 비즈니스 키) |
+| 재시도 분리 | **manual ack + DefaultErrorHandler + DLT** — 시스템 실패는 3회 재시도 후 DLT로 격리 |
+
+즉 Kafka 자체가 Inbox 테이블 역할을 대신하고 있어서, 별도 Inbox를 두면 **같은 데이터를 두 번 저장하는 셈**이다.
+
+### Inbox가 진짜 필요한 경우
+
+- **소스가 Kafka가 아닌 경우** — HTTP webhook, RabbitMQ 등 durable하지 않은 곳에서 받을 때. Kafka는 이미 durable log라 이 문제가 없다.
+- **처리 로직이 매우 비싼 경우** — 실패 후 재실행 코스트가 커서 미리 Inbox에 쌓아두고 워커 풀로 분산해야 하는 경우.
+- **처리 지연을 허용해야 하는 경우** — 배치 스케줄러가 나중에 처리하는 시나리오.
+
+현재 도메인(좋아요 집계, 결제 집계, 조회수 집계, 쿠폰 발급) 중 어느 것도 위 세 조건에 해당하지 않는다.
+
+### 트레이드오프
+
+| 얻는 것 | 잃는 것 |
+|---|---|
+| 브로커 독립적인 재처리 (Kafka 리텐션 지나도 재실행 가능) | 모든 이벤트를 두 번 저장 (Inbox + 실제 처리 결과) |
+| 처리 지연 분리 (백프레셔에 유리) | Inbox 프로세서/스케줄러/상태 관리 코드 |
+| 리플레이 히스토리 확보 | 트랜잭션 경계가 하나 더 늘어 복잡도 증가 |
+
+지금 도메인 규모에서는 **비용이 이득을 초과한다**. 실제로 Kafka 리텐션(기본 7일)이 짧게 느껴지거나 브로커 의존을 줄여야 할 이유가 생기면 그때 도입을 재검토한다.
+
+### 정리
+
+- Outbox: **꼭 필요** — Producer가 발행에 실패하면 유실 위험이 있어 DB 트랜잭션과 묶어야 함
+- Inbox: **불필요** — Kafka 자체가 Inbox 역할, `event_handled`가 멱등, DLT가 격리를 담당
+
+Outbox와 Inbox는 이름은 대칭이지만 **문제의 성격이 다르다.** 대칭이라는 이유만으로 둘 다 도입할 필요는 없다.
+
+---
+
+## 공통 — 통합 검증 (Testcontainers)
+
+Testcontainers로 실제 Kafka(`apache/kafka:3.8.1`) + MySQL을 띄워 검증:
+
+- `LIKE_ADDED` 발행 → `like_count == 1`, `event_handled` 1건
+- `ORDER_CONFIRMED`(items 2건) 발행 → 각 productId의 `sales_count` 증가, `event_handled` 키 `"order:{id}"` 1건
+- 같은 orderId `ORDER_CONFIRMED` 2회 발행 → `sales_count` 1회만 반영 (멱등 확인)
+
+쿠폰은 별도 동시성 통합 테스트에서 20 스레드 동시 요청으로 수량 제한과 멱등을 검증한다(Kafka 리스너 비활성 상태로 서비스 계층 직접 호출).
+
+### 검증 중 발견한 버그 — 이중 직렬화
+
+Producer `value-serializer`가 `JsonSerializer`였는데, Outbox payload는 이미 ObjectMapper로 직렬화된 **JSON 문자열**이다. JsonSerializer가 이 문자열을 한 번 더 직렬화해 바깥에 따옴표가 덧씌워진 채 발행됐다.
+
+Consumer가 `StringDeserializer`로 받아 파싱하면 JSON 객체가 아니라 **문자열 리터럴**로 읽혀 `.get("eventType")`이 null → NPE → ack 안 됨 → lag 무한 누적.
+
+→ Producer 설정을 `JsonSerializer` → `StringSerializer`로 수정.
+
+> Producer와 Consumer의 직렬화 방식은 항상 짝을 맞춰야 한다. payload를 코드에서 직접 문자열로 만들면 String 계열, 객체를 그대로 넘기면 Json 계열이어야 한다. 섞이면 이중 인코딩이 조용히 발생한다.
+
+---
+
+## 공통 — ApplicationEvent 목록
+
+| 이벤트 | 발행처 | phase | 목적 | 리스너 |
+|---|---|---|---|---|
+| `PaymentConfirmedEvent` | `PaymentFacade.applyPgResult` (SUCCESS) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
+| `PaymentFailedEvent` | `PaymentFacade.applyPgResult` (FAIL) | AFTER_COMMIT | 알림 | `PaymentEventListener` |
+| `OrderCreatedEvent` | `OrderFacade.createOrder` | AFTER_COMMIT | 행동 로그 | `UserActionLogListener` |
+| `ProductViewedEvent` | `ProductFacade.getProduct` | AFTER_COMMIT | 행동 로그 + 조회수 전파 | `UserActionLogListener` · `ProductViewEventPublisher` |
+
+> `PaymentConfirmedEvent`(알림)와 `order-events` Outbox INSERT(집계)는 목적이 달라 같은 SUCCESS 분기에 공존한다 — 하나는 유실 허용(알림), 하나는 유실 불가(집계).
+
+---
+
 ## 진행 현황
 
 | 도메인 | ApplicationEvent | Outbox Producer | Consumer |
@@ -680,4 +725,4 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 | 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증, DLT 포함) |
 | 결제 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증, DLT 포함) |
 | 조회수 | ✅ 완료 | ✅ 완료 (Kafka 직접, Outbox 미경유) | ✅ 완료 (Testcontainers 검증, DLT 공유) |
-| 쿠폰 | — | ✅ 완료 (Outbox) | ✅ 완료 (DLT 포함) |
+| 쿠폰 | — | ✅ 완료 (Outbox) | ✅ 완료 (동시성 테스트, DLT 포함) |
