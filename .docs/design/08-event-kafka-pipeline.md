@@ -141,7 +141,7 @@ AFTER_COMMIT 리스너에서 DB를 써야 할 때(REQUIRES_NEW) 새 커넥션이
 **알려진 한계**
 
 - **중복 발행 감지 한계**: Poller가 발행 성공 후 `published_at` 갱신 전 크래시하면, 재시작 시 같은 이벤트가 새 (partition, offset)으로 재발행된다. eventId가 좌표 기반이라 이 경우 중복 감지 불가. 해결책: outbox.id를 Kafka header로 넘겨 Consumer가 eventId로 사용.
-- **DLT 미구현**: 영속 실패 시 lag 누적. production 투입 전 필요.
+- ~~**DLT 미구현**~~ → **DLT 적용됨** (아래 "실패 처리 — 전역 DLT 정책" 참조)
 
 ---
 
@@ -212,7 +212,7 @@ payload에 items 배열을 포함해 Consumer가 추가 API 호출 없이 집계
 
 **알려진 한계**
 
-- DLT 미구현
+- ~~DLT 미구현~~ → **DLT 적용됨** (전역 정책 섹션 참조)
 - 취소/환불 시 `sales_count` 감소 경로 없음 → 현재는 "확정 누적"이며 "순매출"이 아님
 
 ### 통합 검증 (Testcontainers)
@@ -384,14 +384,12 @@ WHERE id = :couponId AND remaining_count > 0
 
 PENDING/ISSUED/FAILED 모두 API 사전 차단 대상에 포함한 이유도 같다. FAILED인 사람이 다시 요청해도 이미 선착순에서 탈락한 것이다.
 
-### 재시도 전략
+### 재시도 전략 — FixedBackOff + DLT
 
-시스템 실패 시 ack 안 함 → 다음 poll에서 재시도. 지수 백오프를 쓰지 않은 이유:
+전역 정책(아래 "실패 처리 — 전역 DLT 정책" 섹션)을 그대로 따른다. 쿠폰 도메인의 특수 사항:
 
-- **지수 백오프 문제**: 같은 파티션의 다음 메시지가 백오프 동안 막힌다(파티션 블로킹). 선착순 쿠폰에서 A의 처리가 지연되는 동안 B, C, D의 처리도 멈춘다.
-- 고정 간격으로 빠르게 재시도(poll 주기), 일정 횟수 실패하면 DLT로 이관하는 것이 이 도메인에 맞다.
-
-현재는 무한 재시도(DLT 미구현). `coupon-issue-requests.DLT` 리스너는 로깅용으로 구성했고, 실제 DLT 라우팅은 `DefaultErrorHandler + FixedBackOff` 설정이 필요하다.
+- **비즈니스 실패는 DLT로 가지 않는다.** 수량 소진/중복 요청은 서비스가 status=FAILED로 마킹하고 정상 반환 → ack. DLT에 도착하는 건 오직 시스템 예외(DB 다운 등).
+- **선착순 시나리오와 FixedBackOff의 궁합**: A의 재시도(총 3초)가 뒤따르는 B, C, D를 밀지만, 지수 백오프의 십수 초 지연보다 훨씬 짧아 대기 유저 체감 지연이 작다. 3초 후 DLT로 옮겨 파티션을 해방하는 게 선착순 도메인에 맞다.
 
 ### API 사전 차단(이중 방어)
 
@@ -432,6 +430,72 @@ API 수준 체크는 "이미 요청을 넣은 사람이 중복 요청 보내는 
 | 기존 코드 영향 | 신규 | 주문, 결제 등이 이미 참조 중 |
 
 `coupon_issues`는 "쿠폰이 발급됐다"는 비즈니스 사실이고, `coupon_issue_requests`는 "비동기 발급 요청의 진행 상태"다. 의미가 달라 합치면 기존 코드가 비동기 흐름을 모르는 채로 `coupon_issues`를 읽다가 PENDING 상태를 발급된 것으로 오인할 수 있다.
+
+---
+
+## 실패 처리 — 전역 DLT 정책
+
+### 커버리지
+
+```
+API/Producer         Broker              Consumer
+    ↓                  ↓                    ↓
+[발행 실패]        [브로커 장애]        [처리 실패]
+    ↑                                      ↑
+  Outbox 담당                            DLT 담당
+```
+
+| 지점 | 예시 | 잡히는 곳 | 결과 |
+|---|---|---|---|
+| **Producer → Broker 발행 실패** | 브로커 다운, ISR 부족 | Outbox 패턴 | `outbox_events.published_at = NULL`로 남고 Poller가 재시도. **DLT로 안 감** |
+| **Consumer 처리 실패 (시스템)** | DB 다운, 파싱 실패, 코드 버그 | `DefaultErrorHandler + DeadLetterPublishingRecoverer` | 1초 간격 3회 재시도 후 `.DLT` 이관 |
+| **Consumer 처리 실패 (비즈니스)** | 수량 소진, 중복 요청 | Service가 정상 반환 | ack. DLT로 안 감 |
+| **Broker → Consumer 전달 실패** | Consumer가 브로커 못 잡음 | Kafka 클라이언트 내부 재시도 | 앱 코드는 관여 안 함 |
+
+### 공통 설정
+
+`support/kafka/DltKafkaConfig.java`에 전역 팩토리 정의:
+
+```java
+@Bean(DLT_LISTENER_FACTORY)
+ConcurrentKafkaListenerContainerFactory<Object, Object> dltListenerContainerFactory(...) {
+    factory.getContainerProperties().setAckMode(MANUAL);
+    factory.setCommonErrorHandler(new DefaultErrorHandler(
+        new DeadLetterPublishingRecoverer(kafkaTemplate),
+        new FixedBackOff(1000L, 3L)
+    ));
+}
+```
+
+모든 컨슈머(`CouponIssueConsumer`, `LikeEventConsumer`, `PaymentEventConsumer`, `ViewEventConsumer`)가 `containerFactory = DLT_LISTENER_FACTORY`로 지정해 재사용한다.
+
+### DLT 토픽 (명시 선언)
+
+`auto.create.topics.enable=false`이므로 각 DLT를 `NewTopic` 빈으로 선언:
+
+| 원본 토픽 | DLT 토픽 | 사용 컨슈머 |
+|---|---|---|
+| `catalog-events` | `catalog-events.DLT` | Like + View (fan-out) |
+| `order-events` | `order-events.DLT` | Payment |
+| `coupon-issue-requests` | `coupon-issue-requests.DLT` | Coupon |
+
+### FixedBackOff(1s, 3) 선택 이유
+
+| 대안 | 문제 |
+|---|---|
+| ExponentialBackOff | 같은 파티션의 다음 메시지가 백오프 동안 막힌다(파티션 블로킹). 처리량 급감 |
+| 무한 재시도 (기존 no-ack 방식) | 영속 실패 시 파티션이 영원히 잠긴다. lag 무한 누적 |
+| **FixedBackOff(1s, 3) — 채택** | 총 3초 파티션 블록 후 DLT 이관. 짧은 일시 오류는 흡수하고 영속 실패는 격리 |
+
+### 컨슈머별 DLT 리스너
+
+DLT 리스너의 역할은 **관찰**뿐이다 — 자동 재처리는 위험(3회 실패한 걸 되돌리면 무한 루프). 사람이 원인 확인 후 수동 재발행.
+
+- `catalog-events.DLT`: `LikeEventConsumer.onDlt`에서 로깅 (View는 리스너 생략 — 중복 로깅 회피)
+- `order-events.DLT`: `PaymentEventConsumer.onDlt`
+- `coupon-issue-requests.DLT`: `CouponIssueConsumer.onDlt`
+
+운영에서는 이 자리에 알림 훅(Slack/Sentry/Prometheus)을 붙인다.
 
 ---
 
@@ -613,7 +677,7 @@ event_handled (event_id PK, handled_at)  -- Consumer 멱등 처리용
 
 | 도메인 | ApplicationEvent | Outbox Producer | Consumer |
 |---|---|---|---|
-| 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
-| 결제 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증) |
-| 조회수 | ✅ 완료 | ✅ 완료 (Kafka 직접, Outbox 미경유) | ✅ 완료 (Testcontainers 검증) |
-| 쿠폰 | — | ✅ 완료 (Outbox) | ✅ 완료 |
+| 좋아요 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증, DLT 포함) |
+| 결제 | ✅ 완료 | ✅ 완료 | ✅ 완료 (Testcontainers 검증, DLT 포함) |
+| 조회수 | ✅ 완료 | ✅ 완료 (Kafka 직접, Outbox 미경유) | ✅ 완료 (Testcontainers 검증, DLT 공유) |
+| 쿠폰 | — | ✅ 완료 (Outbox) | ✅ 완료 (DLT 포함) |
