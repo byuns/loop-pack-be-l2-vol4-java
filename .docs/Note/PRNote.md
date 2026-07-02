@@ -73,17 +73,7 @@
 
 ---
 
-**[결정 6] Inbox 미도입 — 대칭이라고 둘 다 두지 않는다**
-
-- 고려한 대안:
-  - A (Inbox 도입): 수신 즉시 payload를 DB에 저장하고 별도 워커가 처리
-  - B (미도입): 멱등 기록(`event_handled`)만 둠
-- 최종 결정: **B (미도입)**
-- 트레이드오프: Inbox의 세 목적(durability·멱등·재시도 분리)을 이미 다른 것이 대신한다 — **Kafka 브로커 자체가 durable log**(offset 미커밋 시 재-poll), `event_handled`가 멱등, `DLT`가 재시도 격리. 소스가 Kafka라 durability 문제가 없는데 Inbox를 통으로 두면 같은 데이터를 두 번 저장하는 셈이다. Outbox와 Inbox는 이름만 대칭이고 문제의 성격이 다르다 — Outbox는 Producer의 발행 유실을 막으려 **꼭 필요**하고, Inbox는 여기선 **불필요**하다.
-
----
-
-**[결정 7] 쿠폰 선착순 — 동기 처리 vs Kafka 직렬화**
+**[결정 6] 쿠폰 선착순 — 동기 처리 vs Kafka 직렬화**
 
 - 고려한 대안:
   - A (동기 TX): `issueCoupon()`이 발급까지 한 트랜잭션에서 완료. DB row lock이 직렬화 지점
@@ -95,24 +85,39 @@
 
 ## 📊 Kafka 옵션 실험 — 설계 검증
 
-이론으로 판단한 옵션 동작을 실제로 돌려 확인했다.
+이론으로 결정한 옵션들을 실제로 돌려 동작을 확인했다. 예상과 다른 결과가 설계 결정에 영향을 준 것들만 남긴다.
 
-**Producer 옵션**
+**`acks=all` + `enable.idempotence=true`를 반드시 함께 명시해야 하는 이유**
 
-- **`acks=0` + `idempotence=true` (의도적 모순)** — 기대는 `ConfigException`이었으나 에러 없이 시작하고 로그에 `enable.idempotence = false`로 찍혔다. Kafka 3.0+는 충돌 옵션을 throw 대신 **silent disable**한다. `acks=all`을 함께 명시해야 멱등이 유효하다.
-- **Kafka down 시 `acks=0` vs `all`** — 기대는 "acks=0은 응답 안 기다리니 성공"이었으나 둘 다 send 실패(`published_at=NULL`). `acks`는 TCP 연결이 잡힌 뒤의 "응답 대기" 옵션이라, broker가 죽으면 연결 자체가 실패해 acks 값과 무관하게 깨진다. 이때 쌓인 이벤트는 broker 복구 후 Poller가 재시도한다.
-- **`linger.ms`** — 0(기본) 320ms vs 100 → 2533ms(~8배). Poller가 `send().get()` 동기 1건씩 발행이라 linger는 대기 시간만 더한다. **현재 0 유지.**
+`acks=0` + `idempotence=true`를 의도적으로 충돌시켰을 때 `ConfigException`이 날 거라 예상했지만, 에러 없이 시작하고 로그에 `enable.idempotence = false`로 찍혔다. Kafka 3.0+는 충돌 옵션을 예외 대신 silent disable로 처리한다. `acks=all`을 함께 명시하지 않으면 멱등이 조용히 꺼진다.
 
-**Broker 다중 (전용 controller 1 + broker 3)**
+**broker가 죽으면 `acks` 값과 무관하게 발행이 실패한다**
 
-- **`acks=1` vs `all`** — 처리량 ~26,500 → ~18,900 rec/s(30%↓), 지연 ~219 → ~467ms(2배). 내구성은 공짜가 아니다 → 유실 허용 조회수는 직접 발행, 유실 불가 집계만 이 비용을 감수.
-- **`min.insync.replicas=2` (RF=3)** — broker 1대 down은 발행 성공(ISR 2≥2), 2대 down은 `NotEnoughReplicasException`으로 거부. "1대 장애는 버티고 2대면 차라리 멈춘다"는 균형점. 거부되는 동안 outbox에 쌓였다가 복구 후 자동 재시도 — **Outbox가 ISR 부족까지 흡수**한다.
+`acks=0`은 응답을 기다리지 않으니 broker가 죽어도 성공할 거라 예상했지만, `acks=0`과 `all` 모두 send가 실패했다(`published_at=NULL`). `acks`는 TCP 연결이 잡힌 뒤의 응답 대기 옵션이라, broker가 죽으면 연결 자체가 실패해 acks 값이 의미 없다. 이때 outbox에 쌓인 이벤트는 broker 복구 후 Poller가 자동 재시도한다 — Outbox가 broker 장애까지 흡수하는 이유다.
 
-**Consumer 옵션**
+**`acks=all`의 비용 — 내구성은 공짜가 아니다**
 
-- **`enable.auto.commit=false` + manual ack** — auto commit은 처리 전 크래시 시 유실. at-least-once에는 manual ack 필수.
-- **`max.poll.interval.ms` 초과** — 처리가 느려 poll 주기를 넘기면 그룹에서 추방돼 `commitSync()`가 `CommitFailedException`. 처리 지연 문제는 `session.timeout`이 아니라 `max.poll.interval.ms`/`max.poll.records`로 대응.
-- **`group.id`** — 다른 그룹은 fan-out(각자 전부 수신), 같은 그룹은 파티션 분담. `like-aggregator`와 `view-aggregator`가 같은 `catalog-events`를 각자 독립 집계.
+3-broker 클러스터에서 `acks=1` vs `all` 비교: 처리량 ~26,500 → ~18,900 rec/s(30%↓), 지연 ~219 → ~467ms(2배). 이 비용 때문에 유실 허용인 조회수는 Outbox 없이 직접 발행하고, 유실 불가인 likeCount·salesCount만 이 비용을 감수하는 방식으로 도메인별로 나눴다.
+
+**`min.insync.replicas=2`가 Outbox와 맞물리는 방식**
+
+RF=3 / `min.insync.replicas=2` 설정에서 broker 1대 down은 발행 성공(ISR 2≥2), 2대 down은 `NotEnoughReplicasException`으로 거부됐다. 거부되는 동안 outbox에 `published_at=NULL`로 이벤트가 쌓이고, broker 복구 후 Poller가 자동으로 재시도한다. ISR 부족으로 인한 발행 거부까지 Outbox가 흡수한다.
+
+**`linger.ms`는 현재 구조에서 효과가 없다**
+
+`linger.ms=0`(기본) 320ms vs `linger.ms=100` → 2533ms(~8배). Poller가 `send().get()` 동기로 1건씩 발행하는 구조라 linger를 높여봐야 대기 시간만 추가된다. 여러 send()가 동시에 일어나는 환경에서만 배치 효과가 생긴다. **현재 0 유지.**
+
+**`enable.auto.commit=false` + manual ack가 필수인 이유**
+
+auto commit 상태에서 poll 후 처리 전 크래시를 시뮬레이션했을 때, 재구독 시 해당 메시지를 받지 못했다. offset이 자동 커밋돼 처리된 것으로 기록되기 때문이다. at-least-once 보장에는 manual ack가 필수다.
+
+**처리 지연은 `session.timeout`이 아닌 `max.poll.interval.ms`로 대응한다**
+
+`max.poll.interval.ms=2000`에서 4초 처리(sleep)로 초과시키면 그룹에서 추방돼 `commitSync()`가 `CommitFailedException`으로 실패했다. 처리가 느린 문제라면 `session.timeout`을 늘려도 해결되지 않고 `max.poll.interval.ms`를 늘리거나 `max.poll.records`를 줄여야 한다.
+
+**`group.id`가 fan-out 구조를 결정한다**
+
+다른 그룹 2개는 같은 토픽에서 각자 전부 수신(fan-out), 같은 그룹 Consumer 2개는 파티션을 나눠 처리(분담)했다. `like-aggregator`와 `view-aggregator`가 같은 `catalog-events`를 각자 독립적으로 집계할 수 있는 이유다.
 
 **통합 검증** — Testcontainers로 실제 Kafka + MySQL을 띄워 `LIKE_ADDED`→likeCount, `ORDER_CONFIRMED`(items 2건)→salesCount, 같은 orderId 2회 발행→1회만 반영(멱등)을 확인. 쿠폰은 20 스레드 동시 요청으로 수량 제한·멱등 검증.
 
