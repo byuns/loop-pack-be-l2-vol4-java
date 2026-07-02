@@ -125,23 +125,11 @@ auto commit 상태에서 poll 후 처리 전 크래시를 시뮬레이션했을 
 
 ## 🤔 고민한 점 / 막혔던 부분
 
-**이중 직렬화 버그.** Producer `value-serializer`가 `JsonSerializer`였는데 Outbox payload는 이미 ObjectMapper로 만든 **JSON 문자열**이었다. JsonSerializer가 한 번 더 직렬화해 바깥에 따옴표가 덧씌워졌고, Consumer가 파싱하면 객체가 아닌 문자열 리터럴로 읽혀 `.get("eventType")`이 null → NPE → ack 실패 → lag 무한 누적. `StringSerializer`로 바꿔(String↔String) 정렬했다. **Producer·Consumer 직렬화는 항상 짝을 맞춰야 한다.**
-
----
-
-**좌표 기반 멱등의 중복 발행 한계.** Poller가 발행 성공 후 `published_at` 갱신 전에 크래시하면, 재시작 시 같은 이벤트가 새 (partition, offset)으로 재발행된다. eventId가 좌표 기반인 좋아요는 이 경우 중복 감지가 안 된다. 해결책은 `outbox.id`를 Kafka header로 넘겨 Consumer가 그것을 eventId로 쓰는 것 — 결제가 비즈니스 키를 쓰는 이유이기도 하다. 집계 도메인은 중복 몇 건이 흡수되는 편이라 우선순위를 낮춰 두었다.
-
----
-
 **쌓이는 기록의 정리 시점(retention).** `outbox_events`(발행분)와 `event_handled`(멱등 로그)가 둘 다 무한 증식한다. 조회는 부분 인덱스/PK 기반이라 성능 문제는 아니고, 순수하게 증식 관리다. 다만 **지워도 되는 시점이 다르다** — outbox 발행분은 일 끝난 죽은 데이터라 보관 기간이 자유롭지만, 멱등 로그는 살아있는 중복 판단 근거라 같은 이벤트 재도착(재전송·재발행·DLT 재처리) 시 없으면 이중 집계가 난다. 그래서 멱등 로그는 **Kafka 리텐션보다 길게** 보관 후 삭제해야 안전하다. (리텐션을 늘리면 멱등 로그 보관도 함께 늘려야 하는 숨은 결합이 있다.)
 
 ---
 
 **readOnly TX 안에서 이벤트 발행.** 조회수는 `getProduct`(readOnly TX)에서 발행하는데, TX 밖에서 publish하면 `@TransactionalEventListener`가 발화하지 않는다. readOnly TX도 커밋되므로 그 안에서 발행해야 AFTER_COMMIT이 정상 동작한다.
-
----
-
-**Eventual Consistency — 읽기 시점.** 이벤트로 분리하는 순간 "좋아요 직후 화면을 갱신하면 likeCount가 아직 집계 전일 수 있다"는 문제가 생긴다. 집계 API 분리·낙관적 UI·읽기는 DB 직접(CQRS 방향) 중에서 선택해야 하며, 이벤트 분리는 코드 분리로 끝나지 않고 "언제 정확한 값을 보장하는가"까지 설계에 영향을 준다.
 
 ---
 
