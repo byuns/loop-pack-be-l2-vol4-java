@@ -49,7 +49,7 @@ class CouponAdminV1ApiE2ETest {
 
     private CouponAdminV1Dto.CreateRequest validCreateRequest() {
         return new CouponAdminV1Dto.CreateRequest(
-            "10% 할인 쿠폰", CouponType.RATE, 10L, null, ZonedDateTime.now().plusDays(30)
+            "10% 할인 쿠폰", CouponType.RATE, 10L, null, ZonedDateTime.now().plusDays(30), null
         );
     }
 
@@ -84,7 +84,7 @@ class CouponAdminV1ApiE2ETest {
         void returnsBadRequest_whenNameIsBlank() {
             // arrange
             CouponAdminV1Dto.CreateRequest request = new CouponAdminV1Dto.CreateRequest(
-                "", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30)
+                "", CouponType.FIXED, 1000L, null, ZonedDateTime.now().plusDays(30), null
             );
 
             // act

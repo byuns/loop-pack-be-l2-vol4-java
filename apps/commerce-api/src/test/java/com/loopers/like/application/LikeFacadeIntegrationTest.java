@@ -51,12 +51,14 @@ class LikeFacadeIntegrationTest {
 
         @DisplayName("정상 요청이면, DB에 저장되고 LikeInfo를 반환하며 likeCount가 증가한다.")
         @Test
-        void returnsLikeInfo_whenRequestIsValid() {
+        void returnsLikeInfo_whenRequestIsValid() throws InterruptedException {
             // arrange
             ProductModel product = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
 
             // act
             LikeInfo result = likeFacade.addLike(1L, product.getId());
+            // [fix] likeCount 업데이트는 AFTER_COMMIT @Async 리스너에서 처리되므로 eventual consistency 대기
+            Thread.sleep(500);
 
             // assert
             assertAll(
@@ -103,13 +105,16 @@ class LikeFacadeIntegrationTest {
 
         @DisplayName("좋아요한 상품이면, DB에서 삭제되고 likeCount가 감소한다.")
         @Test
-        void deletesLike_whenLikeExists() {
+        void deletesLike_whenLikeExists() throws InterruptedException {
             // arrange
             ProductModel product = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
             likeFacade.addLike(1L, product.getId());
+            Thread.sleep(500);
 
             // act
             likeFacade.cancelLike(1L, product.getId());
+            // [fix] likeCount 업데이트는 AFTER_COMMIT @Async 리스너에서 처리되므로 eventual consistency 대기
+            Thread.sleep(500);
 
             // assert
             assertThat(likeJpaRepository.findByUserIdAndProductId(1L, product.getId())).isEmpty();

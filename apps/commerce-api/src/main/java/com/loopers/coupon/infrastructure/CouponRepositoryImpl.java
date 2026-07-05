@@ -40,4 +40,9 @@ public class CouponRepositoryImpl implements CouponRepository {
         if (ids.isEmpty()) return List.of();
         return couponJpaRepository.findAllByIds(ids);
     }
+
+    @Override
+    public int decrementRemainingCount(Long couponId) {
+        return couponJpaRepository.decrementRemainingCount(couponId);
+    }
 }

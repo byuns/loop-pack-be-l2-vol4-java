@@ -220,11 +220,13 @@ class ProductFacadeIntegrationTest {
 
         @DisplayName("LIKES_DESC 정렬이면 좋아요 많은 순으로 반환된다.")
         @Test
-        void returnsMostLikedFirst_whenSortIsLikesDesc() {
+        void returnsMostLikedFirst_whenSortIsLikesDesc() throws InterruptedException {
             // arrange
             ProductModel popular = savedProduct("에어맥스", 100);
             savedProduct("조던1", 50);
             likeFacade.addLike(1L, popular.getId());
+            // [fix] likeCount 업데이트는 AFTER_COMMIT @Async 리스너에서 처리되므로 eventual consistency 대기
+            Thread.sleep(500);
 
             // act
             List<ProductSummaryInfo> result = productFacade.getProducts(SortCondition.LIKES_DESC, null, false, 0, 20);

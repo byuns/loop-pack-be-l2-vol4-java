@@ -29,7 +29,7 @@ public class CouponAdminV1Controller {
         @RequestBody CouponAdminV1Dto.CreateRequest request
     ) {
         CouponInfo info = couponFacade.createCoupon(
-            request.name(), request.type(), request.value(), request.minOrderAmount(), request.expiredAt()
+            request.name(), request.type(), request.value(), request.minOrderAmount(), request.expiredAt(), request.maxCount()
         );
         return ApiResponse.success(CouponAdminV1Dto.CouponResponse.from(info));
     }

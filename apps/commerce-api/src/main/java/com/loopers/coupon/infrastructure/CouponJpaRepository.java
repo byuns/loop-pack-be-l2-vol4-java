@@ -4,6 +4,7 @@ import com.loopers.coupon.domain.CouponModel;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -20,4 +21,8 @@ public interface CouponJpaRepository extends JpaRepository<CouponModel, Long> {
 
     @Query("SELECT c FROM CouponModel c WHERE c.id IN :ids")
     List<CouponModel> findAllByIds(@Param("ids") List<Long> ids);
+
+    @Modifying
+    @Query("UPDATE CouponModel c SET c.remainingCount = c.remainingCount - 1 WHERE c.id = :couponId AND c.remainingCount > 0")
+    int decrementRemainingCount(@Param("couponId") Long couponId);
 }

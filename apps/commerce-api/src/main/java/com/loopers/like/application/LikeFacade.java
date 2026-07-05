@@ -11,6 +11,8 @@ import com.loopers.product.domain.ProductModel;
 import com.loopers.product.domain.ProductRepository;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
+import com.loopers.support.outbox.OutboxEvent;
+import com.loopers.support.outbox.OutboxRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Caching;
@@ -34,6 +36,7 @@ public class LikeFacade {
     private final StockRepository stockRepository;
     private final BrandRepository brandRepository;
     private final LikeRegistrationPolicy likeRegistrationPolicy;
+    private final OutboxRepository outboxRepository;
 
     @Caching(evict = {
         @CacheEvict(cacheNames = "product", key = "#productId"),
@@ -46,7 +49,12 @@ public class LikeFacade {
 
         LikeModel like = likeService.createLike(userId, productId);
         LikeInfo saved = LikeInfo.from(likeRepository.save(like));
-        productRepository.incrementLikeCount(productId);
+        outboxRepository.save(OutboxEvent.of(
+            "catalog-events",
+            "LIKE_ADDED",
+            String.valueOf(productId),
+            "{\"productId\":" + productId + ",\"eventType\":\"LIKE_ADDED\"}"
+        ));
         return saved;
     }
 
@@ -58,7 +66,12 @@ public class LikeFacade {
     public void cancelLike(Long userId, Long productId) {
         LikeModel like = likeService.cancelLike(likeRepository.findByUserIdAndProductId(userId, productId));
         likeRepository.delete(like);
-        productRepository.decrementLikeCount(productId);
+        outboxRepository.save(OutboxEvent.of(
+            "catalog-events",
+            "LIKE_CANCELLED",
+            String.valueOf(productId),
+            "{\"productId\":" + productId + ",\"eventType\":\"LIKE_CANCELLED\"}"
+        ));
     }
 
     @Transactional(readOnly = true)

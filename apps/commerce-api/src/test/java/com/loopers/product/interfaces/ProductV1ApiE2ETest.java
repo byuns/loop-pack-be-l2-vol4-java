@@ -136,12 +136,14 @@ class ProductV1ApiE2ETest {
 
         @DisplayName("sortBy=likes_desc 이면, 좋아요 내림차순으로 반환된다.")
         @Test
-        void returnsByLikesDesc_whenSortByIsLikesDesc() {
+        void returnsByLikesDesc_whenSortByIsLikesDesc() throws InterruptedException {
             // arrange
             ProductModel popular = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
             productJpaRepository.save(new ProductModel("조던1", "나이키 농구화", 200000L, null));
             // [fix] @Modifying 직접 호출은 트랜잭션 필요 → LikeFacade.addLike()로 대체
             likeFacade.addLike(1L, popular.getId());
+            // [fix] likeCount 업데이트는 AFTER_COMMIT @Async 리스너에서 처리되므로 eventual consistency 대기
+            Thread.sleep(500);
 
             // act
             ParameterizedTypeReference<ApiResponse<List<ProductV1Dto.ProductSummaryResponse>>> responseType = new ParameterizedTypeReference<>() {};
