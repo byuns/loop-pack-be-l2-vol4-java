@@ -25,7 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @SpringBootTest
-@TestPropertySource(properties = "queue.max-size=5")
+// 스케줄러가 대기 유저를 꺼내가면 순번 검증이 깨지므로 비활성화
+@TestPropertySource(properties = {"queue.max-size=5", "queue.scheduler.enabled=false"})
 class QueueFacadeIntegrationTest {
 
     @Autowired

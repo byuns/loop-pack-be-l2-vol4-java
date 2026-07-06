@@ -50,6 +50,17 @@ resilience4j:
       default:
         timeout-duration: 600ms
 
+queue:
+  max-size: 100000 # 대기열 상한 (초과 시 429)
+  scheduler:
+    enabled: true
+    interval-ms: 100 # 실행 주기 — 입장을 시간축으로 분산해 Thundering Herd 완화
+    batch-size: 10 # 회당 입장 인원 — 커넥션 풀 40 × 주문 몫 50% × (1000ms / 처리시간 200ms) = 초당 100명 → 100ms당 10명
+  token:
+    ttl-seconds: 300 # 입장 토큰 TTL 5분 — 주문서 확인 + 결제 수단 선택에 충분한 시간
+  entry-token:
+    required: true # false 시 토큰 검증 우회 — Redis 장애 대비 kill switch
+
 springdoc:
   use-fqn: true
   swagger-ui:
@@ -71,6 +82,18 @@ spring:
 pg:
   url: http://localhost:8082
   callback-url: http://localhost:8080/api/v1/payments/callback
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+
+# [fix] 캐시된 타 테스트 컨텍스트의 백그라운드 스케줄러가 공유 Redis 대기열을 비워 순번 검증이 깨지던 문제
+# 테스트에서는 스케줄러를 끄고 admitNextBatch() 수동 호출로 검증한다
+queue:
+  scheduler:
+    enabled: false
 
 ---
 spring:

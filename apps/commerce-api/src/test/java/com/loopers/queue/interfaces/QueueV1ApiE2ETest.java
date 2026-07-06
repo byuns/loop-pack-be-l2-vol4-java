@@ -25,7 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@TestPropertySource(properties = "queue.max-size=5")
+// 스케줄러가 대기 유저를 꺼내가면 순번 검증이 깨지므로 비활성화 (READY 검증은 admitNextBatch 수동 호출)
+@TestPropertySource(properties = {"queue.max-size=5", "queue.scheduler.enabled=false"})
 class QueueV1ApiE2ETest {
 
     private static final String ENTER_URL = "/api/v1/queue/enter";
@@ -177,6 +178,27 @@ class QueueV1ApiE2ETest {
 
             // assert
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        }
+
+        @DisplayName("토큰이 발급된 유저를 조회하면, 200과 함께 READY 상태와 토큰을 반환한다.")
+        @Test
+        void returnsReadyStatusWithToken_whenTokenIsIssued() {
+            // arrange
+            queueFacade.enter(1L);
+            queueFacade.admitNextBatch();
+
+            // act
+            ParameterizedTypeReference<ApiResponse<QueueV1Dto.WaitingResponse>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<QueueV1Dto.WaitingResponse>> response = testRestTemplate.exchange(
+                POSITION_URL + "?userId=1", HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert
+            assertAll(
+                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getBody().data().status()).isEqualTo(QueueStatus.READY),
+                () -> assertThat(response.getBody().data().token()).isNotBlank(),
+                () -> assertThat(response.getBody().data().position()).isNull()
+            );
         }
     }
 

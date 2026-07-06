@@ -1,10 +1,30 @@
 # 09. 대기열 시스템
 
-## 트래픽 폭증 시 전략 비교
+블랙 프라이데이처럼 순간적으로 대규모 트래픽이 몰릴 때, 주문 API 앞단에 대기열을 두어
+시스템을 보호하면서 유저에게 공정한 대기 경험을 제공한다.
 
-블랙 프라이데이처럼 순간적으로 대규모 트래픽이 몰릴 때, 시스템을 어떻게 보호할 것인가.
+## 전체 흐름 (Step 1 + 2)
+
+```
+[유저] POST /queue/enter
+     → Redis Sorted Set에 줄 세움 (INCR 카운터로 순번 부여)
+     → "당신은 512번째입니다"
+
+[유저] GET /queue/position (polling)
+     → WAITING + 순번  →  ...  →  READY + 입장 토큰
+
+[스케줄러] 100ms마다 실행
+     → ZPOPMIN으로 앞에서 10명 꺼냄
+     → 입장 토큰 발급 (Redis SET, TTL 5분)
+
+[유저] POST /orders (Header: X-Entry-Token)
+     → 토큰 검증 → 주문 처리 → 성공 시 토큰 삭제
+     → 이후 흐름은 R7 이벤트 파이프라인 그대로
+```
 
 ---
+
+# 왜 대기열인가 — 전략 비교
 
 ## 1. 아무것도 없을 때
 
@@ -22,8 +42,6 @@
        ↓
 커넥션 경쟁 → 타임아웃 → 500 / 503
 ```
-
----
 
 ## 2. Rate Limiting을 했을 때
 
@@ -46,14 +64,12 @@
    주문 API      429 즉시 반환 (나머지)
 ```
 
----
-
 ## 3. 대기열을 만들었을 때
 
 요청을 거부하지 않고 줄을 세운다. 시스템이 감당할 수 있는 속도로만 통과시킨다.
 
 **장점**
-- 진입 순서가 timestamp 기준으로 보장됨 → 공정
+- 진입 순서가 보장됨 → 공정
 - 거부 없이 나중에라도 처리 → 주문 기회 유지
 - 순번 / 예상 대기 시간을 보여주면 유저 이탈 감소
 
@@ -71,8 +87,6 @@
 DB가 감당 가능한 처리량으로 안정적 처리
 ```
 
----
-
 ## 비교 요약
 
 |  | 아무것도 없음 | Rate Limiting | 대기열 |
@@ -86,12 +100,15 @@ DB가 감당 가능한 처리량으로 안정적 처리
 
 > Rate Limiting은 "초과분을 잘라낸다", 대기열은 "초과분을 나중에 처리한다".
 > 주문처럼 **기회를 보존해야 하는 상황**에서는 대기열이 적합하다.
+>
+> 단, 둘은 양자택일이 아니다 — 대기열에도 상한을 두고 초과분은 429로 거부하므로,
+> "대기열 뒤에 Rate Limiting을 한 겹 더 둔" 조합 구조다.
 
 ---
 
-## Step 1 설계 결정
+# Step 1 — Redis 기반 대기열
 
-### 결정 요약
+## 설계 결정
 
 | # | 항목 | 결정 | 근거 |
 |---|---|---|---|
@@ -102,11 +119,7 @@ DB가 감당 가능한 처리량으로 안정적 처리
 | 5 | API 응답 스펙 | 단일 응답 + `status` 필드 | 프론트 처리 단순화 |
 | 6 | 대기열 상한 | 있음 (초과 시 429) | Redis 메모리 보호 |
 
----
-
-### 1. 데이터 구조
-
-**Redis Sorted Set 사용**
+### 1. 데이터 구조 — Redis Sorted Set
 
 ```
 Key: "queue:waiting"
@@ -121,85 +134,26 @@ Key: "queue:waiting"
 
 - **Score**: `INCR queue:counter`로 발급받은 순번
 - **Member**: userId
-- **Key**: `queue:waiting` (단일)
+- 순번 조회는 `ZRANK` (0-based라 +1)
 
-원자적 카운터가 필요한 이유:
+Score를 timestamp가 아닌 원자적 카운터로 한 이유:
 - `System.currentTimeMillis()`는 ms 정밀도라 동시 진입 시 겹칠 수 있음
 - 서버가 여러 대면 시계 편차로 순서가 뒤집힐 수 있음
 - Redis `INCR`은 원자적이라 절대 겹치지 않음
 
-### 2. 중복 진입 정책
+### 2. 중복 진입 정책 — 기존 순번 유지
 
-**`ZADD NX` 옵션 사용 → 기존 순번 유지**
-
-- 이미 대기 중인 유저의 재요청은 무시하고 기존 순번 반환
+- 이미 대기 중인 유저의 재요청은 무시하고 기존 순번 반환 (`ZADD NX`)
 - 새로고침/네트워크 재시도에 안전
 - 티켓팅처럼 "새로고침 시 밀림" 정책은 사용하지 않음
   - 이유: 이커머스 주문은 극단적 트래픽 억제보다 유저 신뢰 유지가 우선
 
-### 3. 동시성 처리
+### 3. 대기열 상한
 
-- Redis 명령어 하나는 원자적
-- 여러 명령을 조합할 때는 원자성 확보 필요
-- `ZADD NX`로 "확인 + 넣기"를 한 번에 처리
-- 필요 시 Lua Script로 `INCR + ZADD`를 원자적으로 묶기
+- `queue.max-size` (기본 100000) 초과 시 `429 Too Many Requests` 반환
+- Redis 메모리 폭발로 대기열 시스템 자체가 무너지는 상황 방지
 
-### 4. API 응답 스펙
-
-**단일 응답 스펙 + `status` 필드로 상태 표현**
-
-상태 종류:
-- `WAITING` — 대기 중
-- `READY` — 토큰 발급됨 (통과 가능)
-- `NOT_IN_QUEUE` — 대기열에 없음
-
-응답 예시:
-
-```json
-// 대기 중
-{
-  "status": "WAITING",
-  "position": 342,
-  "estimatedWaitTime": 180,
-  "token": null
-}
-
-// 토큰 발급됨
-{
-  "status": "READY",
-  "position": null,
-  "estimatedWaitTime": null,
-  "token": "abc123...",
-  "expiresAt": "2026-07-06T10:05:00Z"
-}
-```
-
-### 5. 대기열 상한
-
-- 상한 값 설정 (구체 수치는 Redis 메모리 기준으로 산정)
-- 초과 시 `429 Too Many Requests` 반환
-- Redis 메모리 폭발로 전체 시스템이 무너지는 상황 방지
-
----
-
-## Nice-to-Have (이번 주 도전 항목)
-
-- [x] **SSE 기반 실시간 순번 Push** — Polling 대신 서버가 순번 변화를 푸시
-- [x] **Polling 주기 동적 조절** — 순번 구간별로 조회 주기 다르게 안내
-- [x] **Redis 장애 시 Fallback** — Redis가 죽었을 때 주문 API 동작 정책
-- [ ] Thundering Herd 완화 (Jitter) — 이번엔 스킵
-
----
-
-## 미결정 항목 (Step 2 관련)
-
-- 토큰 TTL (몇 분?)
-- 스케줄러 배치 크기 (DB 커넥션 풀 × 평균 처리 시간 기준)
-- 스케줄러 실행 주기 (몇 초마다?)
-
----
-
-## Step 1 구현 결과
+## 구현 결과
 
 ### 패키지 구성
 
@@ -222,7 +176,9 @@ com.loopers.queue
 
 ### 핵심 구현: 원자적 진입 (Lua Script)
 
-`INCR + ZCARD + ZADD NX + ZRANK`를 하나의 Lua Script로 묶어서 **상한 초과·중복 진입·순서 부여**를 원자적으로 처리한다.
+진입 시 해야 할 일은 "중복 확인 → 상한 확인 → 순번 발급 → 줄 세우기" 4가지인데,
+명령을 따로 날리면 명령 사이에 다른 요청이 끼어들어 상한이 뚫리거나 순번이 중복될 수 있다.
+`INCR + ZCARD + ZADD NX + ZRANK`를 하나의 Lua Script로 묶어 원자적으로 처리한다.
 
 ```lua
 if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
@@ -248,11 +204,14 @@ return redis.call('ZRANK', KEYS[1], ARGV[1]) + 1
 | GET | `/api/v1/queue/position?userId=` | 순번 조회 | 200 / 400 |
 | GET | `/api/v1/queue/size` | 전체 대기 인원 조회 | 200 |
 
-### 응답 예시
+응답은 상태가 달라도 필드 구성이 같고 `status`로 구분한다:
 
 ```json
 // 대기 중
 { "status": "WAITING", "position": 3, "estimatedWaitTime": null, "token": null }
+
+// 토큰 발급됨 (Step 2에서 채워짐)
+{ "status": "READY", "position": null, "estimatedWaitTime": null, "token": "abc123..." }
 
 // 대기열에 없음
 { "status": "NOT_IN_QUEUE", "position": null, "estimatedWaitTime": null, "token": null }
@@ -261,12 +220,7 @@ return redis.call('ZRANK', KEYS[1], ARGV[1]) + 1
 { "meta": { "result": "FAIL", "errorCode": "Too Many Requests", "message": "대기열이 가득 찼습니다." } }
 ```
 
-> `estimatedWaitTime`은 Step 3(예상 대기 시간 계산), `token`은 Step 2(스케줄러/토큰 발급)에서 채운다.
-
-### 설정
-
-- `queue.max-size` (기본값 100000) — 대기열 상한
-- 초과 시 `TOO_MANY_REQUESTS(429)` 반환 (`ErrorType` enum에 추가)
+> `estimatedWaitTime`은 Step 3(예상 대기 시간 계산)에서 채운다.
 
 ### 테스트 커버리지
 
@@ -275,15 +229,181 @@ return redis.call('ZRANK', KEYS[1], ARGV[1]) + 1
 | 단위 | `WaitingModelTest` | 4 | userId/position 유효성 |
 | 단위 | `WaitingInfoTest` | 3 | 상태별 팩토리 |
 | 통합 | `QueueFacadeIntegrationTest` | 12 | 진입·조회·상한·재진입·동시성 |
-| E2E | `QueueV1ApiE2ETest` | 8 | HTTP 스펙 검증 (200/400/429) |
+| E2E | `QueueV1ApiE2ETest` | 8+1 | HTTP 스펙 검증 (200/400/429), READY 응답 |
 
 **동시성 테스트**
 - 여러 스레드가 동시에 서로 다른 유저로 진입 → 순번 겹치지 않고 순차 부여
 - 같은 유저가 동시에 여러 번 진입 → 단 하나의 순번만 부여
 
-### Step 1 체크리스트 완료 여부
+---
+
+# Step 2 — 입장 토큰 & 스케줄러
+
+## 설계 결정
+
+| # | 항목 | 결정 | 근거 |
+|---|---|---|---|
+| 1 | 스케줄러 주기 / 배치 크기 | 100ms / 10명 | 아래 산정 근거 참고. 입장을 시간축으로 분산해 Thundering Herd 완화 |
+| 2 | 대기열에서 꺼내기 | `ZPOPMIN N` | "앞에서 N명 조회 + 삭제"가 원자적 명령 하나 |
+| 3 | 토큰 TTL | 5분 | 주문서 확인 + 결제 수단 선택에 충분, 미사용 토큰의 슬롯 점유 최소화 |
+| 4 | 토큰 저장 구조 | `queue:token:{userId}` = 토큰값 (TTL 5분) | userId 키 하나로 소유자 확인 + READY 분기 + 만료를 모두 해결 |
+| 5 | 토큰 검증 위치 | OrderFacade 진입부 | 구조 단순, 통합 테스트 용이. 인터셉터는 대상 API가 늘어날 때 재검토 |
+| 6 | 토큰 삭제 시점 | 주문 성공 시에만 삭제 | 실패(재고 부족·결제 실패) 시 TTL 내 재시도 가능 — 유저 신뢰 우선 |
+| 7 | 토큰 만료 유저 | 처음부터 재진입 | 대기열에도 토큰도 없는 상태 → 다시 줄 서기 |
+| 8 | 스케줄러 다중화 | 단일 인스턴스 가정 | 다중화 시 ShedLock 등 분산 락 필요 — 과제 범위 밖, 한계로 명시 |
+
+### 배치 크기 산정 근거
+
+```
+DB 커넥션 풀:            40개 (HikariCP maximum-pool-size)
+주문 API 몫:             50% → 20개 (상품 조회 등 다른 API와 풀 공유)
+주문 평균 처리 시간 가정:  200ms (실측 전 보수적 가정)
+
+초당 입장 가능 인원 = 20개 × (1000ms / 200ms) = 초당 100명
+스케줄러 100ms 주기 → 배치 크기 = 100명 / 10회 = 10명
+```
+
+- 초당 100명을 1초에 한 번 몰아넣지 않고 100ms마다 10명씩 쪼개는 이유:
+  같은 총량이라도 시간축으로 분산되어 주문 API로의 스파이크(Thundering Herd)가 완화된다.
+- 토큰 발급 ≠ 즉시 주문: 토큰을 받은 유저는 수 초~수십 초에 걸쳐 주문하므로 실제 DB 유입은
+  이보다 완만하게 퍼진다. 위 수치는 "최악의 경우(전원 즉시 주문)"에도 풀이 버티는 보수적 기준.
+- 평균 처리 시간은 추후 메트릭 실측값으로 보정한다.
+
+### 토큰 key 설계 — userId를 키로
+
+```
+Key:   queue:token:{userId}     ← 토큰이 아니라 "유저"가 키
+Value: UUID 토큰값
+TTL:   300초
+```
+
+userId를 키로 삼으면 세 가지가 별도 장치 없이 해결된다:
+
+1. **소유자 확인** — 검증 시 "요청 유저의 키"를 조회해 헤더 토큰과 비교하므로 남의 토큰으로는 통과 불가
+2. **만료 처리** — Redis TTL이 자동 삭제. 만료 검사 코드가 없음 ("키 없음 = 미발급 또는 만료")
+3. **READY 조회** — 순번 조회 시 이 키 하나만 확인하면 토큰 발급 여부를 알 수 있음
+
+### getPosition 상태 분기 (Step 2에서 변경 필수)
+
+스케줄러가 `ZPOPMIN`으로 꺼낸 유저는 ZRANK가 null이 되므로, 토큰 확인 없이는
+`NOT_IN_QUEUE`로 오판된다. 반드시 토큰을 먼저 확인해야 한다.
+
+```
+1. queue:token:{userId} 존재? → READY + 토큰 반환
+2. ZRANK 존재?              → WAITING + 순번
+3. 둘 다 없음               → NOT_IN_QUEUE
+```
+
+### 알려진 트레이드오프
+
+- **ZPOPMIN과 토큰 SET 사이 장애**: 꺼내긴 했는데 토큰 발급 전에 서버가 죽으면 해당 유저는
+  대기열·토큰 모두 없는 상태가 된다. Lua로 묶는 대신 "유저가 재진입하면 복구된다"로 허용 —
+  발생 확률 대비 구현 복잡도를 낮추는 선택.
+- **토큰 동시 사용**: 성공 시에만 삭제하는 정책상 같은 토큰의 동시 요청이 이론상 가능하다.
+  `GETDEL`로 검증+삭제를 원자화하면 막을 수 있지만 주문 실패 시 재시도가 불가능해지는
+  딜레마가 있어 유저 친화 쪽을 택했다. 주문 도메인의 재고 차감 로직이 최종 방어선.
+
+## 구현 결과
+
+### 추가된 구성 요소
+
+```
+com.loopers.queue
+├── domain
+│   ├── EntryTokenModel.java       입장 토큰 도메인 모델 (userId, token) — issue()로 UUID 발급
+│   ├── EntryTokenRepository.java  토큰 저장/조회/삭제 Port (TTL 지원)
+│   └── QueueRepository.java       popMin(count) 추가 — ZPOPMIN
+├── application
+│   ├── QueueScheduler.java        @Scheduled(100ms) → admitNextBatch() 호출
+│   ├── EntryTokenValidator.java   토큰 검증(validate) / 소비(consume) — OrderFacade가 사용
+│   └── QueueFacade.java           admitNextBatch() 추가, getPosition()에 READY 분기 추가
+└── infrastructure
+    └── EntryTokenRepositoryImpl.java  Redis SET + TTL (key: queue:token:{userId})
+
+com.loopers.order
+├── application/OrderFacade.java       createOrderWithEntryToken() — 검증 → 주문 → 성공 시 토큰 삭제
+└── interfaces/OrderV1Controller.java  POST /orders에 X-Entry-Token 헤더 추가
+```
+
+### 동작 흐름
+
+```
+[스케줄러] 100ms마다 ZPOPMIN 10명 → queue:token:{userId} = UUID (TTL 5분)
+
+[유저] GET /queue/position
+     → 토큰 있음: READY + 토큰    ← 토큰을 먼저 확인해야 NOT_IN_QUEUE와 구분됨
+     → ZRANK 있음: WAITING + 순번
+     → 둘 다 없음: NOT_IN_QUEUE
+
+[유저] POST /orders (X-Entry-Token 헤더)
+     → userId로 저장된 토큰 조회 → 값 비교 (타인 토큰 차단)
+     → 불일치/없음/만료: 403 FORBIDDEN
+     → 주문 성공: 토큰 삭제 / 주문 실패: 토큰 유지 (TTL 내 재시도 가능)
+```
+
+주문 흐름의 정책은 코드 구조에 그대로 드러난다:
+
+```java
+entryTokenValidator.validate(userId, entryToken);   // ① 검증 (실패 → 403)
+OrderInfo info = createOrder(...);                  // ② 주문 (여기서 예외 → 토큰 유지)
+entryTokenValidator.consume(userId);                // ③ 성공했을 때만 삭제
+```
+
+403(FORBIDDEN)을 쓴 이유: 로그인은 이미 된 유저이고, 부족한 것은 인증이 아니라 "입장 권한"이라서.
+
+### 설정 (application.yml)
+
+| 키 | 값 | 의미 |
+|---|---|---|
+| `queue.max-size` | 100000 | 대기열 상한 (초과 시 429) |
+| `queue.scheduler.enabled` | true (test 프로파일은 false) | 스케줄러 on/off |
+| `queue.scheduler.interval-ms` | 100 | 실행 주기 |
+| `queue.scheduler.batch-size` | 10 | 회당 입장 인원 (산정 근거는 위 참고) |
+| `queue.token.ttl-seconds` | 300 | 토큰 TTL 5분 |
+| `queue.entry-token.required` | true | false 시 검증 우회 — Redis 장애 대비 kill switch (Graceful Degradation) |
+
+### 테스트 커버리지 (Step 2 추가분)
+
+| 레이어 | 파일 | 케이스 수 | 검증 대상 |
+|---|---|---|---|
+| 단위 | `EntryTokenModelTest` | 6 | 유효성 검증, UUID 발급·유일성 |
+| 통합 | `QueueAdmissionIntegrationTest` | 8 | 배치 크기·순서·TTL·READY 분기 |
+| 통합 | `OrderEntryTokenIntegrationTest` | 5 | 검증·삭제·실패 시 유지·만료·타인 토큰 |
+| E2E | `OrderEntryTokenE2ETest` | 3 | X-Entry-Token 200/403 |
+| E2E | `QueueV1ApiE2ETest` (추가) | 1 | position 조회 READY + 토큰 포함 |
+
+> 테스트 환경 주의: 스프링 테스트 컨텍스트 캐시에 남은 타 컨텍스트의 스케줄러가 공유 Redis
+> 대기열을 비워 순번 검증을 오염시키는 문제가 있어, test 프로파일에서는 스케줄러를 끄고
+> `admitNextBatch()` 수동 호출로 검증한다.
+
+---
+
+# 진행 현황
+
+## Step 1 체크리스트
 
 - [x] Redis Sorted Set 기반 대기열 진입 API (`POST /queue/enter`)
 - [x] 순번 조회 API (`GET /queue/position`)
 - [x] userId 기반 중복 진입 방지 (ZADD NX + Lua)
 - [x] 전체 대기 인원 조회 (`GET /queue/size`)
+
+## Step 2 체크리스트
+
+- [x] 스케줄러가 주기적으로 대기열에서 N명을 꺼내 입장 토큰 발급 (100ms / 10명)
+- [x] 토큰 TTL 설정 (5분)
+- [x] 주문 API 진입 시 토큰 검증 (userId 기준 조회로 타인 토큰 차단)
+- [x] 주문 완료 후 토큰 삭제 (실패 시 유지 — TTL 내 재시도 허용)
+- [x] 처리량 기준으로 스케줄러 배치 크기 산정 근거 문서화 (위 "배치 크기 산정 근거")
+- [x] 토큰 발급 시 순번 조회 응답에 토큰 포함 (Step 3 항목 선반영)
+
+## Step 3 남은 항목
+
+- [ ] 예상 대기 시간 계산 로직 (`estimatedWaitTime` 채우기)
+- [ ] Polling 부하 고려 (대기 인원에 따른 주기 안내)
+
+## Nice-to-Have (이번 주 도전 항목)
+
+- [ ] **SSE 기반 실시간 순번 Push** — Polling 대신 서버가 순번 변화를 푸시
+- [ ] **Polling 주기 동적 조절** — 순번 구간별로 조회 주기 다르게 안내
+- [x] **Redis 장애 시 Fallback** — `queue.entry-token.required` kill switch로 검증 우회 가능
+- [ ] Thundering Herd 완화 (Jitter) — 배치 분산(100ms/10명)으로 부분 완화, Jitter는 스킵

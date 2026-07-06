@@ -2,11 +2,14 @@ package com.loopers.queue.infrastructure;
 
 import com.loopers.queue.domain.QueueRepository;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 @Repository
 public class QueueRepositoryImpl implements QueueRepository {
@@ -64,5 +67,18 @@ public class QueueRepositoryImpl implements QueueRepository {
     public Long getSize() {
         Long size = redisTemplate.opsForZSet().zCard(QUEUE_KEY);
         return size == null ? 0L : size;
+    }
+
+    @Override
+    public List<Long> popMin(long count) {
+        Set<ZSetOperations.TypedTuple<String>> popped = redisTemplate.opsForZSet().popMin(QUEUE_KEY, count);
+        if (popped == null) {
+            return List.of();
+        }
+        return popped.stream()
+            .map(ZSetOperations.TypedTuple::getValue)
+            .filter(Objects::nonNull)
+            .map(Long::valueOf)
+            .toList();
     }
 }

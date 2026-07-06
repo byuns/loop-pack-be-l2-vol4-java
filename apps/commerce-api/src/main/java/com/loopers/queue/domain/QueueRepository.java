@@ -1,5 +1,6 @@
 package com.loopers.queue.domain;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface QueueRepository {
@@ -20,4 +21,10 @@ public interface QueueRepository {
      * 전체 대기 인원 조회.
      */
     Long getSize();
+
+    /**
+     * 대기열 앞에서 최대 count명을 꺼낸다 (조회 + 삭제가 원자적).
+     * @return 꺼낸 유저 ID 목록 (순번 빠른 순), 비어 있으면 empty list
+     */
+    List<Long> popMin(long count);
 }

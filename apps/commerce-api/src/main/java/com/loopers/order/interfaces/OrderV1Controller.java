@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -29,12 +30,13 @@ public class OrderV1Controller {
     @PostMapping
     public ApiResponse<OrderV1Dto.OrderResponse> createOrder(
         @CurrentUser LoginUser loginUser,
+        @RequestHeader(value = "X-Entry-Token", required = false) String entryToken,
         @RequestBody OrderV1Dto.CreateRequest request
     ) {
         List<OrderItemCommand> commands = request.items().stream()
             .map(item -> new OrderItemCommand(item.productId(), item.quantity()))
             .toList();
-        OrderInfo info = orderFacade.createOrder(loginUser.id(), loginUser.loginId(), commands, request.couponId());
+        OrderInfo info = orderFacade.createOrderWithEntryToken(loginUser.id(), loginUser.loginId(), commands, request.couponId(), entryToken);
         return ApiResponse.success(OrderV1Dto.OrderResponse.from(info));
     }
 
