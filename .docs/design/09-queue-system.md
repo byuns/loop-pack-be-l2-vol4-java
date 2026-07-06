@@ -196,3 +196,94 @@ Key: "queue:waiting"
 - 토큰 TTL (몇 분?)
 - 스케줄러 배치 크기 (DB 커넥션 풀 × 평균 처리 시간 기준)
 - 스케줄러 실행 주기 (몇 초마다?)
+
+---
+
+## Step 1 구현 결과
+
+### 패키지 구성
+
+```
+com.loopers.queue
+├── domain
+│   ├── WaitingModel.java        도메인 모델 (userId, position)
+│   ├── QueueStatus.java         WAITING / READY / NOT_IN_QUEUE
+│   └── QueueRepository.java     Repository Port
+├── application
+│   ├── QueueFacade.java         진입 / 순번 조회 / 전체 인원 조회
+│   └── WaitingInfo.java         응답 모델 (record + 팩토리)
+├── infrastructure
+│   └── QueueRepositoryImpl.java Redis Sorted Set + Lua Script
+└── interfaces
+    ├── QueueV1ApiSpec.java      Swagger 스펙
+    ├── QueueV1Controller.java   REST 컨트롤러
+    └── QueueV1Dto.java          요청/응답 DTO
+```
+
+### 핵심 구현: 원자적 진입 (Lua Script)
+
+`INCR + ZCARD + ZADD NX + ZRANK`를 하나의 Lua Script로 묶어서 **상한 초과·중복 진입·순서 부여**를 원자적으로 처리한다.
+
+```lua
+if redis.call('ZSCORE', KEYS[1], ARGV[1]) then
+  return redis.call('ZRANK', KEYS[1], ARGV[1]) + 1
+end
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then
+  return -1
+end
+local score = redis.call('INCR', KEYS[2])
+redis.call('ZADD', KEYS[1], score, ARGV[1])
+return redis.call('ZRANK', KEYS[1], ARGV[1]) + 1
+```
+
+- 이미 있으면 → 기존 순번 반환 (중복 진입 방지)
+- 상한 초과 → `-1` 반환 → Facade에서 429로 변환
+- 그 외 → INCR 카운터로 score 발급 → ZADD → 새 순번 반환
+
+### API
+
+| Method | Path | 설명 | 응답 상태 |
+|---|---|---|---|
+| POST | `/api/v1/queue/enter` | 대기열 진입 | 200 / 400 / 429 |
+| GET | `/api/v1/queue/position?userId=` | 순번 조회 | 200 / 400 |
+| GET | `/api/v1/queue/size` | 전체 대기 인원 조회 | 200 |
+
+### 응답 예시
+
+```json
+// 대기 중
+{ "status": "WAITING", "position": 3, "estimatedWaitTime": null, "token": null }
+
+// 대기열에 없음
+{ "status": "NOT_IN_QUEUE", "position": null, "estimatedWaitTime": null, "token": null }
+
+// 상한 초과 (429)
+{ "meta": { "result": "FAIL", "errorCode": "Too Many Requests", "message": "대기열이 가득 찼습니다." } }
+```
+
+> `estimatedWaitTime`은 Step 3(예상 대기 시간 계산), `token`은 Step 2(스케줄러/토큰 발급)에서 채운다.
+
+### 설정
+
+- `queue.max-size` (기본값 100000) — 대기열 상한
+- 초과 시 `TOO_MANY_REQUESTS(429)` 반환 (`ErrorType` enum에 추가)
+
+### 테스트 커버리지
+
+| 레이어 | 파일 | 케이스 수 | 검증 대상 |
+|---|---|---|---|
+| 단위 | `WaitingModelTest` | 4 | userId/position 유효성 |
+| 단위 | `WaitingInfoTest` | 3 | 상태별 팩토리 |
+| 통합 | `QueueFacadeIntegrationTest` | 12 | 진입·조회·상한·재진입·동시성 |
+| E2E | `QueueV1ApiE2ETest` | 8 | HTTP 스펙 검증 (200/400/429) |
+
+**동시성 테스트**
+- 여러 스레드가 동시에 서로 다른 유저로 진입 → 순번 겹치지 않고 순차 부여
+- 같은 유저가 동시에 여러 번 진입 → 단 하나의 순번만 부여
+
+### Step 1 체크리스트 완료 여부
+
+- [x] Redis Sorted Set 기반 대기열 진입 API (`POST /queue/enter`)
+- [x] 순번 조회 API (`GET /queue/position`)
+- [x] userId 기반 중복 진입 방지 (ZADD NX + Lua)
+- [x] 전체 대기 인원 조회 (`GET /queue/size`)

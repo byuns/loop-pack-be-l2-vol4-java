@@ -14,6 +14,7 @@ public enum ErrorType {
     CONFLICT(HttpStatus.CONFLICT, HttpStatus.CONFLICT.getReasonPhrase(), "이미 존재하는 리소스입니다."),
     // [fix] 타인의 주문 조회 시 403 처리 누락 → FORBIDDEN 추가
     FORBIDDEN(HttpStatus.FORBIDDEN, HttpStatus.FORBIDDEN.getReasonPhrase(), "접근 권한이 없습니다."),
+    TOO_MANY_REQUESTS(HttpStatus.TOO_MANY_REQUESTS, HttpStatus.TOO_MANY_REQUESTS.getReasonPhrase(), "요청이 너무 많습니다. 잠시 후 다시 시도해주세요."),
     SERVICE_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase(), "외부 서비스가 일시적으로 불가합니다.");
 
     private final HttpStatus status;
