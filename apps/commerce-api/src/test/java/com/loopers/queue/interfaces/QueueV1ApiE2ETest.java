@@ -180,9 +180,9 @@ class QueueV1ApiE2ETest {
             assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         }
 
-        @DisplayName("토큰이 발급된 유저를 조회하면, 200과 함께 READY 상태와 토큰을 반환한다.")
+        @DisplayName("토큰이 발급된 유저를 조회하면, 200과 함께 READY 상태·토큰·만료 시각을 반환한다.")
         @Test
-        void returnsReadyStatusWithToken_whenTokenIsIssued() {
+        void returnsReadyStatusWithTokenAndExpiresAt_whenTokenIsIssued() {
             // arrange
             queueFacade.enter(1L);
             queueFacade.admitNextBatch();
@@ -197,7 +197,28 @@ class QueueV1ApiE2ETest {
                 () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
                 () -> assertThat(response.getBody().data().status()).isEqualTo(QueueStatus.READY),
                 () -> assertThat(response.getBody().data().token()).isNotBlank(),
+                () -> assertThat(response.getBody().data().expiresAt()).isNotNull(),
                 () -> assertThat(response.getBody().data().position()).isNull()
+            );
+        }
+
+        @DisplayName("대기 중인 유저를 조회하면, 예상 대기 시간과 pollAfter를 함께 반환한다.")
+        @Test
+        void returnsEstimateAndPollAfter_whenUserIsWaiting() {
+            // arrange — position 2는 다음 배치 입장 예정(≤10)이라 예상 0초, pollAfter 2초
+            queueFacade.enter(1L);
+            queueFacade.enter(2L);
+
+            // act
+            ParameterizedTypeReference<ApiResponse<QueueV1Dto.WaitingResponse>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<QueueV1Dto.WaitingResponse>> response = testRestTemplate.exchange(
+                POSITION_URL + "?userId=2", HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert
+            assertAll(
+                () -> assertTrue(response.getStatusCode().is2xxSuccessful()),
+                () -> assertThat(response.getBody().data().estimatedWaitTime()).isEqualTo(0L),
+                () -> assertThat(response.getBody().data().pollAfter()).isEqualTo(2L)
             );
         }
     }

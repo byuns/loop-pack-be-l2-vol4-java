@@ -12,6 +12,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.test.context.TestPropertySource;
 
+import java.time.ZonedDateTime;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -166,14 +167,60 @@ class QueueAdmissionIntegrationTest {
             );
         }
 
-        @DisplayName("대기열에도 없고 토큰도 없는 유저를 조회하면, status=NOT_IN_QUEUE를 반환한다.")
+        @DisplayName("대기열에도 없고 토큰도 없는 유저를 조회하면, status=NOT_IN_QUEUE를 반환하고 부가 필드는 모두 null이다.")
         @Test
         void returnsNotInQueue_whenUserHasNoTokenAndNotWaiting() {
             // act
             WaitingInfo info = queueFacade.getPosition(999L);
 
             // assert
-            assertThat(info.status()).isEqualTo(QueueStatus.NOT_IN_QUEUE);
+            assertAll(
+                () -> assertThat(info.status()).isEqualTo(QueueStatus.NOT_IN_QUEUE),
+                () -> assertThat(info.estimatedWaitTime()).isNull(),
+                () -> assertThat(info.pollAfter()).isNull(),
+                () -> assertThat(info.expiresAt()).isNull()
+            );
+        }
+    }
+
+    @DisplayName("예상 대기 시간을 조회할 때, ")
+    @Nested
+    class EstimatedWaitTime {
+
+        @DisplayName("342번째 대기 유저를 조회하면, 예상 4초와 pollAfter 2초를 반환한다.")
+        @Test
+        void returnsEstimateAndPollAfter_whenUserIsWaiting() {
+            // arrange — batch 10 × 초당 10회 = 초당 100명 처리 기준
+            IntStream.rangeClosed(1, 342).forEach(i -> queueFacade.enter((long) i));
+
+            // act
+            WaitingInfo info = queueFacade.getPosition(342L);
+
+            // assert
+            assertAll(
+                () -> assertThat(info.status()).isEqualTo(QueueStatus.WAITING),
+                () -> assertThat(info.estimatedWaitTime()).isEqualTo(4L),
+                () -> assertThat(info.pollAfter()).isEqualTo(2L)
+            );
+        }
+
+        @DisplayName("토큰이 발급된 유저를 조회하면, expiresAt이 현재~5분 사이의 미래 시각이다.")
+        @Test
+        void returnsFutureExpiresAt_whenTokenIsIssued() {
+            // arrange
+            queueFacade.enter(1L);
+            queueFacade.admitNextBatch();
+            ZonedDateTime now = ZonedDateTime.now();
+
+            // act
+            WaitingInfo info = queueFacade.getPosition(1L);
+
+            // assert
+            assertAll(
+                () -> assertThat(info.status()).isEqualTo(QueueStatus.READY),
+                () -> assertThat(info.expiresAt()).isAfter(now),
+                () -> assertThat(info.expiresAt()).isBeforeOrEqualTo(now.plusMinutes(5).plusSeconds(1))
+            );
         }
     }
 }

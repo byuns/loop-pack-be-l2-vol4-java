@@ -378,6 +378,98 @@ entryTokenValidator.consume(userId);                // ③ 성공했을 때만 �
 
 ---
 
+# Step 3 — 실시간 순번 조회 (예상 대기 시간)
+
+## 설계 결정
+
+| # | 항목 | 결정 | 근거 |
+|---|---|---|---|
+| 1 | 처리량 산정 | 정적 — 설정값 기반 (초당 100명) | 스케줄러 처리량은 우리가 통제하는 값이라 변동 요인이 적음. 실측 방식의 복잡도 대비 이득이 작음 |
+| 2 | 표시 방식 | 초 단위 정수, 올림 | 기존 응답 예시와 일치. 분 환산은 프론트 몫 |
+| 3 | 다음 배치 입장 예정자 | position ≤ batch-size(10) → 0초 | "곧 입장" 표시용 |
+| 4 | pollAfter 구간 기준 | 예상 대기 시간 기준 | 입장이 임박할수록 자주 조회. 배치 설정이 바뀌어도 자동 반영 |
+| 5 | READY 응답 | expiresAt 포함 (Redis TTL 조회) | "5분 안에 주문하세요" 카운트다운 제공 |
+
+### 계산 공식
+
+```
+초당 처리량 = batch-size × (1000 / interval-ms) = 10 × 10 = 100명/초
+
+estimatedWaitTime(초) = position ≤ batch-size 이면 0
+                        아니면 ceil(position / 초당 처리량)
+
+예: position 342 → ceil(3.42) = 4초
+```
+
+한계 (문서화): 스케줄러가 멈추면 예상 시간이 실제와 어긋난다. 처리량이 설정값과 크게
+달라지는 운영 상황이 생기면 실측 기반으로 전환을 검토한다.
+
+### Polling 부하와 pollAfter
+
+대기 10만 명이 2초마다 polling하면 초당 5만 요청 — Redis(ZRANK, O(log N))보다 톰캣 워커
+스레드(200개)가 먼저 병목이 된다. 응답에 다음 조회 권장 간격을 포함해 총량을 줄인다:
+
+| 예상 대기 시간 | pollAfter |
+|---|---|
+| 60초 이상 | 10초 |
+| 10~60초 | 5초 |
+| 10초 미만 | 2초 |
+| READY / NOT_IN_QUEUE | null (조회 불필요) |
+
+서버가 강제할 수는 없는 클라이언트 가이드라는 한계가 있다.
+
+### Polling vs SSE
+
+- SSE는 순번 변화를 push할 수 있지만, 대기 인원만큼 동시 커넥션을 유지해야 해서
+  비용이 대기 인원에 비례한다 (10만 명 = 커넥션 10만 개).
+- 대기열은 변화가 느리고 예측 가능한 상태라, 동적 주기 Polling으로 충분하다.
+  Polling은 무상태라 수평 확장이 쉽고 주기 조절로 총량을 제어할 수 있다.
+
+## 구현 결과
+
+### 추가된 구성 요소
+
+```
+com.loopers.queue
+├── domain
+│   └── WaitTimeCalculator.java   순수 자바 — 예상 대기 시간(올림)·pollAfter 계산
+├── application
+│   ├── WaitingInfo.java          pollAfter·expiresAt 필드 추가
+│   └── QueueFacade.java          enter/getPosition에 예상 시간 계산 연결, READY에 expiresAt
+├── domain/EntryTokenRepository.java   getTtl(userId) 추가 — expiresAt 계산용
+└── interfaces/QueueV1Dto.java    응답에 pollAfter·expiresAt 추가
+```
+
+### 응답 예시 (최종)
+
+```json
+// 대기 중 (342번째)
+{ "status": "WAITING", "position": 342, "estimatedWaitTime": 4, "pollAfter": 2,
+  "token": null, "expiresAt": null }
+
+// 토큰 발급됨
+{ "status": "READY", "position": null, "estimatedWaitTime": null, "pollAfter": null,
+  "token": "abc123...", "expiresAt": "2026-07-06T22:10:00+09:00" }
+
+// 대기열에 없음
+{ "status": "NOT_IN_QUEUE", "position": null, "estimatedWaitTime": null, "pollAfter": null,
+  "token": null, "expiresAt": null }
+```
+
+- `POST /queue/enter` 응답에도 동일하게 estimatedWaitTime·pollAfter가 포함된다 (진입 직후부터 안내).
+- READY의 expiresAt은 Redis TTL 조회(`현재 시각 + 남은 TTL`)로 계산한다.
+
+### 테스트 커버리지 (Step 3 추가분)
+
+| 레이어 | 파일 | 케이스 수 | 검증 대상 |
+|---|---|---|---|
+| 단위 | `WaitTimeCalculatorTest` | 6 | 올림 계산·0초 처리·pollAfter 구간 |
+| 단위 | `WaitingInfoTest` (수정) | 3 | 상태별 필드 세팅 |
+| 통합 | `QueueAdmissionIntegrationTest` (추가) | 2 | 342번째 → 4초·pollAfter 2초, expiresAt 미래 시각 |
+| E2E | `QueueV1ApiE2ETest` (추가) | 2 | WAITING 응답 필드, READY + expiresAt |
+
+---
+
 # 진행 현황
 
 ## Step 1 체크리스트
@@ -396,14 +488,16 @@ entryTokenValidator.consume(userId);                // ③ 성공했을 때만 �
 - [x] 처리량 기준으로 스케줄러 배치 크기 산정 근거 문서화 (위 "배치 크기 산정 근거")
 - [x] 토큰 발급 시 순번 조회 응답에 토큰 포함 (Step 3 항목 선반영)
 
-## Step 3 남은 항목
+## Step 3 체크리스트
 
-- [ ] 예상 대기 시간 계산 로직 (`estimatedWaitTime` 채우기)
-- [ ] Polling 부하 고려 (대기 인원에 따른 주기 안내)
+- [x] 예상 대기 시간 계산 로직 (정적 처리량 기반, 올림)
+- [x] Polling 기반 순번 + 예상 대기 시간 응답
+- [x] 토큰 발급 시 순번 조회 응답에 토큰 포함 (Step 2에서 선반영)
+- [x] Polling 부하 고려 — pollAfter로 조회 주기 동적 안내
 
 ## Nice-to-Have (이번 주 도전 항목)
 
 - [ ] **SSE 기반 실시간 순번 Push** — Polling 대신 서버가 순번 변화를 푸시
-- [ ] **Polling 주기 동적 조절** — 순번 구간별로 조회 주기 다르게 안내
+- [x] **Polling 주기 동적 조절** — 예상 대기 시간 구간별 pollAfter 응답 (10/5/2초)
 - [x] **Redis 장애 시 Fallback** — `queue.entry-token.required` kill switch로 검증 우회 가능
 - [ ] Thundering Herd 완화 (Jitter) — 배치 분산(100ms/10명)으로 부분 완화, Jitter는 스킵

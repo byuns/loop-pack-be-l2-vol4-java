@@ -3,6 +3,8 @@ package com.loopers.queue.interfaces;
 import com.loopers.queue.application.WaitingInfo;
 import com.loopers.queue.domain.QueueStatus;
 
+import java.time.ZonedDateTime;
+
 public class QueueV1Dto {
 
     public record EnterRequest(Long userId) {}
@@ -11,14 +13,18 @@ public class QueueV1Dto {
         QueueStatus status,
         Long position,
         Long estimatedWaitTime,
-        String token
+        Long pollAfter,
+        String token,
+        ZonedDateTime expiresAt
     ) {
         public static WaitingResponse from(WaitingInfo info) {
             return new WaitingResponse(
                 info.status(),
                 info.position(),
                 info.estimatedWaitTime(),
-                info.token()
+                info.pollAfter(),
+                info.token(),
+                info.expiresAt()
             );
         }
     }

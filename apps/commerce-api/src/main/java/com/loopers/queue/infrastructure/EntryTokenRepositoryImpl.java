@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 @Repository
 public class EntryTokenRepositoryImpl implements EntryTokenRepository {
@@ -32,6 +33,16 @@ public class EntryTokenRepositoryImpl implements EntryTokenRepository {
     @Override
     public void deleteByUserId(Long userId) {
         redisTemplate.delete(key(userId));
+    }
+
+    @Override
+    public Optional<Duration> getTtl(Long userId) {
+        Long seconds = redisTemplate.getExpire(key(userId), TimeUnit.SECONDS);
+        // -2: 키 없음, -1: TTL 미설정 — 둘 다 유효한 토큰 TTL이 아님
+        if (seconds == null || seconds < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(Duration.ofSeconds(seconds));
     }
 
     private String key(Long userId) {

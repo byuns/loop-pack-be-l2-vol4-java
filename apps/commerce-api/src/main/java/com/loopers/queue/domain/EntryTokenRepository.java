@@ -19,4 +19,9 @@ public interface EntryTokenRepository {
      * 유저의 토큰 삭제 (주문 성공 시 호출).
      */
     void deleteByUserId(Long userId);
+
+    /**
+     * 유저 토큰의 남은 TTL 조회. 토큰이 없거나 만료되었으면 empty.
+     */
+    Optional<Duration> getTtl(Long userId);
 }

@@ -3,6 +3,7 @@ package com.loopers.queue.application;
 import com.loopers.queue.domain.EntryTokenModel;
 import com.loopers.queue.domain.EntryTokenRepository;
 import com.loopers.queue.domain.QueueRepository;
+import com.loopers.queue.domain.WaitTimeCalculator;
 import com.loopers.queue.domain.WaitingModel;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
@@ -10,6 +11,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Optional;
 
@@ -18,6 +20,7 @@ public class QueueFacade {
 
     private final QueueRepository queueRepository;
     private final EntryTokenRepository entryTokenRepository;
+    private final WaitTimeCalculator waitTimeCalculator;
     private final long maxQueueSize;
     private final int batchSize;
     private final Duration tokenTtl;
@@ -27,10 +30,12 @@ public class QueueFacade {
         EntryTokenRepository entryTokenRepository,
         @Value("${queue.max-size:100000}") long maxQueueSize,
         @Value("${queue.scheduler.batch-size:10}") int batchSize,
+        @Value("${queue.scheduler.interval-ms:100}") long intervalMs,
         @Value("${queue.token.ttl-seconds:300}") long tokenTtlSeconds
     ) {
         this.queueRepository = queueRepository;
         this.entryTokenRepository = entryTokenRepository;
+        this.waitTimeCalculator = new WaitTimeCalculator(batchSize, intervalMs);
         this.maxQueueSize = maxQueueSize;
         this.batchSize = batchSize;
         this.tokenTtl = Duration.ofSeconds(tokenTtlSeconds);
@@ -40,8 +45,7 @@ public class QueueFacade {
         validateUserId(userId);
         Long position = queueRepository.enter(userId, maxQueueSize)
             .orElseThrow(() -> new CoreException(ErrorType.TOO_MANY_REQUESTS, "대기열이 가득 찼습니다."));
-        WaitingModel model = new WaitingModel(userId, position);
-        return WaitingInfo.waiting(model, null);
+        return waitingInfoOf(new WaitingModel(userId, position));
     }
 
     public WaitingInfo getPosition(Long userId) {
@@ -49,14 +53,17 @@ public class QueueFacade {
         // 스케줄러가 꺼내간 유저는 ZRANK가 null이므로, 토큰을 먼저 확인해야 READY와 NOT_IN_QUEUE를 구분할 수 있다
         Optional<String> token = entryTokenRepository.findByUserId(userId);
         if (token.isPresent()) {
-            return WaitingInfo.ready(token.get());
+            // 조회와 TTL 확인 사이에 토큰이 만료되는 드문 경합은 대기열 확인으로 넘어간다
+            Optional<Duration> ttl = entryTokenRepository.getTtl(userId);
+            if (ttl.isPresent()) {
+                return WaitingInfo.ready(token.get(), ZonedDateTime.now().plus(ttl.get()));
+            }
         }
         Optional<Long> position = queueRepository.getPosition(userId);
         if (position.isEmpty()) {
             return WaitingInfo.notInQueue();
         }
-        WaitingModel model = new WaitingModel(userId, position.get());
-        return WaitingInfo.waiting(model, null);
+        return waitingInfoOf(new WaitingModel(userId, position.get()));
     }
 
     /**
@@ -67,6 +74,12 @@ public class QueueFacade {
         for (Long userId : userIds) {
             entryTokenRepository.save(EntryTokenModel.issue(userId), tokenTtl);
         }
+    }
+
+    private WaitingInfo waitingInfoOf(WaitingModel model) {
+        long estimated = waitTimeCalculator.estimateWaitSeconds(model.getPosition());
+        long pollAfter = waitTimeCalculator.pollAfterSeconds(estimated);
+        return WaitingInfo.waiting(model, estimated, pollAfter);
     }
 
     private void validateUserId(Long userId) {
