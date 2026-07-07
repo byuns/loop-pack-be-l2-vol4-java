@@ -1,0 +1,562 @@
+{
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "order 2xx": {
+                    "path": "::order 2xx",
+                    "id": "84530211a58fe27f559d8446a66535ce",
+                    "passes": 100,
+                    "fails": 0,
+                    "name": "order 2xx"
+                }
+            }
+    },
+    "metrics": {
+        "http_req_duration{expected_response:true}": {
+            "p(90)": 254.43865999999994,
+            "p(95)": 2100.9882799999978,
+            "avg": 221.55238798114698,
+            "min": 2.6399,
+            "med": 47.4587,
+            "max": 2637.9017
+        },
+        "data_sent": {
+            "count": 168743,
+            "rate": 10736.12544447733
+        },
+        "poll_count": {
+            "p(95)": 18.049999999999997,
+            "avg": 9.73,
+            "min": 2,
+            "med": 9,
+            "max": 19,
+            "p(90)": 17
+        },
+        "order_success": {
+            "count": 100,
+            "rate": 6.362412333831525
+        },
+        "http_req_waiting": {
+            "avg": 221.0928128043992,
+            "min": 2.6399,
+            "med": 47.336,
+            "max": 2637.3496,
+            "p(90)": 253.43819999999997,
+            "p(95)": 2100.452279999998
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 1273,
+            "value": 0
+        },
+        "http_req_duration": {
+            "p(90)": 254.43865999999994,
+            "p(95)": 2100.9882799999978,
+            "avg": 221.55238798114698,
+            "min": 2.6399,
+            "med": 47.4587,
+            "max": 2637.9017
+        },
+        "http_reqs": {
+            "count": 1273,
+            "rate": 80.99350900967531
+        },
+        "iterations": {
+            "count": 100,
+            "rate": 6.362412333831525
+        },
+        "checks": {
+            "passes": 100,
+            "fails": 0,
+            "thresholds": {
+                "rate>0.9": false
+            },
+            "value": 1
+        },
+        "http_req_blocked": {
+            "p(90)": 0,
+            "p(95)": 1.0132999999999999,
+            "avg": 0.13619183032207377,
+            "min": 0,
+            "med": 0,
+            "max": 23.5574
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 6.663,
+            "p(90)": 0,
+            "p(95)": 0.7712399999999948,
+            "avg": 0.08630706991358997
+        },
+        "http_req_sending": {
+            "p(90)": 0,
+            "p(95)": 0.5102399999999999,
+            "avg": 0.08508727415553807,
+            "min": 0,
+            "med": 0,
+            "max": 12.7111
+        },
+        "order_latency": {
+            "max": 2638,
+            "p(90)": 2323.6000000000004,
+            "p(95)": 2420.65,
+            "avg": 1993.48,
+            "min": 660,
+            "med": 2205
+        },
+        "data_received": {
+            "count": 314935,
+            "rate": 20037.46328355231
+        },
+        "http_req_tls_handshaking": {
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0
+        },
+        "vus_max": {
+            "value": 100,
+            "min": 100,
+            "max": 100
+        },
+        "total_latency": {
+            "p(90)": 4897.3,
+            "p(95)": 5019.2,
+            "avg": 3677.01,
+            "min": 1219,
+            "med": 3921.5,
+            "max": 5141
+        },
+        "http_req_receiving": {
+            "med": 0,
+            "max": 18.0857,
+            "p(90)": 0.8252599999999992,
+            "p(95)": 1.0685399999999965,
+            "avg": 0.3744879025923011,
+            "min": 0
+        },
+        "vus": {
+            "min": 0,
+            "max": 100,
+            "value": 35
+        },
+        "iteration_duration": {
+            "med": 3921.8229,
+            "max": 5140.6055,
+            "p(90)": 4897.53676,
+            "p(95)": 5019.173089999999,
+            "avg": 3677.169153000001,
+            "min": 1218.9008
+        }
+    },
+    "setup_data": {
+        "users": [
+            {
+                "loginId": "k88251",
+                "userId": 1
+            },
+            {
+                "loginId": "k88252",
+                "userId": 2
+            },
+            {
+                "loginId": "k88253",
+                "userId": 3
+            },
+            {
+                "userId": 4,
+                "loginId": "k88254"
+            },
+            {
+                "loginId": "k88255",
+                "userId": 5
+            },
+            {
+                "loginId": "k88256",
+                "userId": 6
+            },
+            {
+                "loginId": "k88257",
+                "userId": 7
+            },
+            {
+                "loginId": "k88258",
+                "userId": 8
+            },
+            {
+                "loginId": "k88259",
+                "userId": 9
+            },
+            {
+                "loginId": "k882510",
+                "userId": 10
+            },
+            {
+                "loginId": "k882511",
+                "userId": 11
+            },
+            {
+                "userId": 12,
+                "loginId": "k882512"
+            },
+            {
+                "userId": 13,
+                "loginId": "k882513"
+            },
+            {
+                "loginId": "k882514",
+                "userId": 14
+            },
+            {
+                "loginId": "k882515",
+                "userId": 15
+            },
+            {
+                "loginId": "k882516",
+                "userId": 16
+            },
+            {
+                "loginId": "k882517",
+                "userId": 17
+            },
+            {
+                "loginId": "k882518",
+                "userId": 18
+            },
+            {
+                "userId": 19,
+                "loginId": "k882519"
+            },
+            {
+                "loginId": "k882520",
+                "userId": 20
+            },
+            {
+                "loginId": "k882521",
+                "userId": 21
+            },
+            {
+                "loginId": "k882522",
+                "userId": 22
+            },
+            {
+                "loginId": "k882523",
+                "userId": 23
+            },
+            {
+                "loginId": "k882524",
+                "userId": 24
+            },
+            {
+                "loginId": "k882525",
+                "userId": 25
+            },
+            {
+                "loginId": "k882526",
+                "userId": 26
+            },
+            {
+                "loginId": "k882527",
+                "userId": 27
+            },
+            {
+                "userId": 28,
+                "loginId": "k882528"
+            },
+            {
+                "loginId": "k882529",
+                "userId": 29
+            },
+            {
+                "loginId": "k882530",
+                "userId": 30
+            },
+            {
+                "loginId": "k882531",
+                "userId": 31
+            },
+            {
+                "userId": 32,
+                "loginId": "k882532"
+            },
+            {
+                "loginId": "k882533",
+                "userId": 33
+            },
+            {
+                "userId": 34,
+                "loginId": "k882534"
+            },
+            {
+                "loginId": "k882535",
+                "userId": 35
+            },
+            {
+                "loginId": "k882536",
+                "userId": 36
+            },
+            {
+                "loginId": "k882537",
+                "userId": 37
+            },
+            {
+                "loginId": "k882538",
+                "userId": 38
+            },
+            {
+                "userId": 39,
+                "loginId": "k882539"
+            },
+            {
+                "loginId": "k882540",
+                "userId": 40
+            },
+            {
+                "loginId": "k882541",
+                "userId": 41
+            },
+            {
+                "userId": 42,
+                "loginId": "k882542"
+            },
+            {
+                "loginId": "k882543",
+                "userId": 43
+            },
+            {
+                "loginId": "k882544",
+                "userId": 44
+            },
+            {
+                "loginId": "k882545",
+                "userId": 45
+            },
+            {
+                "loginId": "k882546",
+                "userId": 46
+            },
+            {
+                "userId": 47,
+                "loginId": "k882547"
+            },
+            {
+                "loginId": "k882548",
+                "userId": 48
+            },
+            {
+                "loginId": "k882549",
+                "userId": 49
+            },
+            {
+                "loginId": "k882550",
+                "userId": 50
+            },
+            {
+                "loginId": "k882551",
+                "userId": 51
+            },
+            {
+                "loginId": "k882552",
+                "userId": 52
+            },
+            {
+                "loginId": "k882553",
+                "userId": 53
+            },
+            {
+                "loginId": "k882554",
+                "userId": 54
+            },
+            {
+                "loginId": "k882555",
+                "userId": 55
+            },
+            {
+                "loginId": "k882556",
+                "userId": 56
+            },
+            {
+                "loginId": "k882557",
+                "userId": 57
+            },
+            {
+                "loginId": "k882558",
+                "userId": 58
+            },
+            {
+                "loginId": "k882559",
+                "userId": 59
+            },
+            {
+                "loginId": "k882560",
+                "userId": 60
+            },
+            {
+                "loginId": "k882561",
+                "userId": 61
+            },
+            {
+                "userId": 62,
+                "loginId": "k882562"
+            },
+            {
+                "loginId": "k882563",
+                "userId": 63
+            },
+            {
+                "loginId": "k882564",
+                "userId": 64
+            },
+            {
+                "loginId": "k882565",
+                "userId": 65
+            },
+            {
+                "loginId": "k882566",
+                "userId": 66
+            },
+            {
+                "loginId": "k882567",
+                "userId": 67
+            },
+            {
+                "userId": 68,
+                "loginId": "k882568"
+            },
+            {
+                "loginId": "k882569",
+                "userId": 69
+            },
+            {
+                "loginId": "k882570",
+                "userId": 70
+            },
+            {
+                "loginId": "k882571",
+                "userId": 71
+            },
+            {
+                "loginId": "k882572",
+                "userId": 72
+            },
+            {
+                "loginId": "k882573",
+                "userId": 73
+            },
+            {
+                "loginId": "k882574",
+                "userId": 74
+            },
+            {
+                "loginId": "k882575",
+                "userId": 75
+            },
+            {
+                "loginId": "k882576",
+                "userId": 76
+            },
+            {
+                "loginId": "k882577",
+                "userId": 77
+            },
+            {
+                "loginId": "k882578",
+                "userId": 78
+            },
+            {
+                "loginId": "k882579",
+                "userId": 79
+            },
+            {
+                "loginId": "k882580",
+                "userId": 80
+            },
+            {
+                "loginId": "k882581",
+                "userId": 81
+            },
+            {
+                "loginId": "k882582",
+                "userId": 82
+            },
+            {
+                "loginId": "k882583",
+                "userId": 83
+            },
+            {
+                "loginId": "k882584",
+                "userId": 84
+            },
+            {
+                "loginId": "k882585",
+                "userId": 85
+            },
+            {
+                "loginId": "k882586",
+                "userId": 86
+            },
+            {
+                "loginId": "k882587",
+                "userId": 87
+            },
+            {
+                "userId": 88,
+                "loginId": "k882588"
+            },
+            {
+                "userId": 89,
+                "loginId": "k882589"
+            },
+            {
+                "userId": 90,
+                "loginId": "k882590"
+            },
+            {
+                "loginId": "k882591",
+                "userId": 91
+            },
+            {
+                "loginId": "k882592",
+                "userId": 92
+            },
+            {
+                "loginId": "k882593",
+                "userId": 93
+            },
+            {
+                "loginId": "k882594",
+                "userId": 94
+            },
+            {
+                "loginId": "k882595",
+                "userId": 95
+            },
+            {
+                "loginId": "k882596",
+                "userId": 96
+            },
+            {
+                "loginId": "k882597",
+                "userId": 97
+            },
+            {
+                "loginId": "k882598",
+                "userId": 98
+            },
+            {
+                "loginId": "k882599",
+                "userId": 99
+            },
+            {
+                "loginId": "k8825100",
+                "userId": 100
+            }
+        ]
+    }
+}

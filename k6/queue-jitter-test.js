@@ -61,14 +61,14 @@ export const options = {
 };
 
 export function setup() {
-  const suffix = String(Date.now()).slice(-6);
+  const suffix = String(Date.now()).slice(-4);
   const users = [];
   for (let i = 1; i <= USER_COUNT; i++) {
-    const loginId = `k${suffix}u${i}`;
+    const loginId = `k${suffix}${i}`;
     const body = {
       loginId,
       password: PW,
-      name: `k6u${i}`,
+      name: `테스트`,
       email: `${loginId}@test.com`,
       birthDate: '2000-01-01',
       gender: 'MALE',
@@ -81,7 +81,7 @@ export function setup() {
     }
     users.push({ userId: res.json('data.id'), loginId });
   }
-  console.log(`[setup] ${users.length} users created (loginId prefix: k${suffix}u)`);
+  console.log(`[setup] ${users.length} users created (loginId prefix: k${suffix})`);
   return { users };
 }
 
