@@ -19,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -69,7 +70,7 @@ class OrderEntryTokenIntegrationTest {
         void createsOrder_andDeletesToken_whenTokenIsValid() {
             // arrange
             ProductModel product = savedProduct(100);
-            entryTokenRepository.save(new EntryTokenModel(1L, "valid-token"), TTL);
+            entryTokenRepository.save(new EntryTokenModel(1L, "valid-token", Instant.now()), TTL);
 
             // act
             OrderInfo info = orderFacade.createOrderWithEntryToken(
@@ -105,7 +106,7 @@ class OrderEntryTokenIntegrationTest {
         void throwsForbidden_andKeepsToken_whenTokenMismatches() {
             // arrange
             ProductModel product = savedProduct(100);
-            entryTokenRepository.save(new EntryTokenModel(1L, "my-token"), TTL);
+            entryTokenRepository.save(new EntryTokenModel(1L, "my-token", Instant.now()), TTL);
 
             // act
             CoreException exception = assertThrows(CoreException.class, () ->
@@ -117,7 +118,8 @@ class OrderEntryTokenIntegrationTest {
             // assert
             assertAll(
                 () -> assertThat(exception.getErrorType()).isEqualTo(ErrorType.FORBIDDEN),
-                () -> assertThat(entryTokenRepository.findByUserId(1L)).contains("my-token")
+                () -> assertThat(entryTokenRepository.findByUserId(1L))
+                    .hasValueSatisfying(m -> assertThat(m.getToken()).isEqualTo("my-token"))
             );
         }
 
@@ -126,7 +128,7 @@ class OrderEntryTokenIntegrationTest {
         void keepsToken_whenOrderFails() {
             // arrange
             ProductModel product = savedProduct(1);
-            entryTokenRepository.save(new EntryTokenModel(1L, "valid-token"), TTL);
+            entryTokenRepository.save(new EntryTokenModel(1L, "valid-token", Instant.now()), TTL);
 
             // act
             assertThrows(CoreException.class, () ->
@@ -136,7 +138,33 @@ class OrderEntryTokenIntegrationTest {
             );
 
             // assert
-            assertThat(entryTokenRepository.findByUserId(1L)).contains("valid-token");
+            assertThat(entryTokenRepository.findByUserId(1L))
+                .hasValueSatisfying(m -> assertThat(m.getToken()).isEqualTo("valid-token"));
+        }
+
+        @DisplayName("Jitter visibleAt이 아직 지나지 않은 토큰이면, FORBIDDEN 예외가 발생하고 토큰은 유지된다.")
+        @Test
+        void throwsForbidden_whenTokenIsNotYetVisible() {
+            // arrange — visibleAt을 미래로 두어 아직 노출되지 않은 상태
+            ProductModel product = savedProduct(100);
+            entryTokenRepository.save(
+                new EntryTokenModel(1L, "valid-token", Instant.now().plusSeconds(60)),
+                TTL
+            );
+
+            // act
+            CoreException exception = assertThrows(CoreException.class, () ->
+                orderFacade.createOrderWithEntryToken(
+                    1L, "user1", List.of(new OrderItemCommand(product.getId(), 1)), null, "valid-token"
+                )
+            );
+
+            // assert
+            assertAll(
+                () -> assertThat(exception.getErrorType()).isEqualTo(ErrorType.FORBIDDEN),
+                () -> assertThat(entryTokenRepository.findByUserId(1L))
+                    .hasValueSatisfying(m -> assertThat(m.getToken()).isEqualTo("valid-token"))
+            );
         }
 
         @DisplayName("TTL이 지나 만료된 토큰이면, FORBIDDEN 예외가 발생한다.")
@@ -144,7 +172,7 @@ class OrderEntryTokenIntegrationTest {
         void throwsForbidden_whenTokenIsExpired() throws InterruptedException {
             // arrange
             ProductModel product = savedProduct(100);
-            entryTokenRepository.save(new EntryTokenModel(1L, "short-lived"), Duration.ofMillis(100));
+            entryTokenRepository.save(new EntryTokenModel(1L, "short-lived", Instant.now()), Duration.ofMillis(100));
             Thread.sleep(300);
 
             // act

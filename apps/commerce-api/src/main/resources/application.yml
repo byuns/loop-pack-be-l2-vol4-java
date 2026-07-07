@@ -60,6 +60,8 @@ queue:
     ttl-seconds: 300 # 입장 토큰 TTL 5분 — 주문서 확인 + 결제 수단 선택에 충분한 시간
   entry-token:
     required: true # false 시 토큰 검증 우회 — Redis 장애 대비 kill switch
+  jitter:
+    max-ms: 500 # 토큰 발급 후 노출/검증까지의 랜덤 지연 상한 — 배치 간격 100ms의 5배로 Thundering Herd 완화, 0이면 비활성
 
 springdoc:
   use-fqn: true
@@ -94,6 +96,9 @@ spring:
 queue:
   scheduler:
     enabled: false
+  jitter:
+    # 기본은 0(즉시 노출)로 두어 기존 통합/E2E 테스트를 그대로 유지, Jitter 검증만 별도 클래스에서 override
+    max-ms: 0
 
 ---
 spring:

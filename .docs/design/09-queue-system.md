@@ -470,6 +470,168 @@ com.loopers.queue
 
 ---
 
+# Nice-to-Have 확장
+
+Must-Have 세 단계가 끝난 뒤 추가로 도전한 항목들. 각각 "왜 넣었고, 왜 지금 이 정도로만 넣었는가"를 명시한다.
+
+## Step 4 — Thundering Herd 완화 (Jitter)
+
+### 배경
+
+스케줄러 배치가 시간축에 이미 분산돼 있어도(100ms/10명), 같은 100ms 틱에 발급된 10명은 여전히 사실상 동시에 주문 API를 두드린다.
+Jitter는 그 안에서도 각 유저의 "노출 가능 시각"을 랜덤 지연으로 흩뿌려 주문 API 스파이크를 한 번 더 완화한다.
+
+### 설계 결정
+
+| # | 항목 | 결정 | 근거 |
+|---|---|---|---|
+| 1 | 위치 | 토큰 발급 후 노출/검증까지의 시각 | 실제 스파이크(주문 API)를 가장 직접 완화 |
+| 2 | 범위 | `[0, 500ms]` | 배치 간격 100ms의 5배 — 배치끼리 살짝 겹치는 정도로 유저 체감은 미미 |
+| 3 | 강제 방식 | **서버가 검증에서도 차단** | 클라이언트 Jitter는 커스텀 클라이언트로 우회 가능 → 서버가 진짜 시간축을 결정 |
+| 4 | 저장 방식 | 기존 `queue:token:{userId}` value에 `visibleAtMillis\|token` 형태로 인코딩 | 단일 GET/SET 유지, 추가 키 없음 |
+| 5 | 대기 중 응답 | `WAITING` 재사용 + `position=0` | 클라이언트 로직 변경 최소, WAITING→READY 흐름 유지 |
+
+### 구현 결과
+
+```
+com.loopers.queue
+├── domain
+│   └── EntryTokenModel.java           + visibleAt 필드, issue(userId, jitterMs), isVisible(now)
+├── application
+│   ├── EntryTokenValidator.java       visibleAt 이전 검증 시도는 FORBIDDEN
+│   ├── QueueFacade.java               getPosition에서 visibility 분기, admitNextBatch에 jitter 전달
+│   └── WaitingInfo.java               + pendingVisibility(remainingSeconds) 팩토리
+└── infrastructure
+    └── EntryTokenRepositoryImpl.java  value 형태: "{visibleAtMillis}|{token}"
+```
+
+### 동작 흐름
+
+```
+[스케줄러] ZPOPMIN → EntryTokenModel.issue(userId, 500)
+     → visibleAt = now + random(0, 500ms)
+     → queue:token:{userId} = "1728...|abc-uuid"
+
+[유저] GET /queue/position
+     → 토큰 있음 && visibleAt 지남   → READY + 토큰
+     → 토큰 있음 && visibleAt 이전   → WAITING (position=0, estimatedWaitTime=남은 초)
+     → 토큰 없음                     → 기존 ZRANK 로직
+
+[유저] POST /orders (visibleAt 이전)
+     → EntryTokenValidator.validate → FORBIDDEN
+     → 유저는 정상적으로 서버 READY를 기다렸으므로 이 케이스는 실질적으로 발생 안 함 (방어선 역할)
+```
+
+### 설정
+
+| 키 | 값 | 의미 |
+|---|---|---|
+| `queue.jitter.max-ms` | 500 (프로덕션), 0 (test 프로파일 기본) | 발급 후 최대 노출 지연 (ms) |
+
+### 테스트 커버리지
+
+| 레이어 | 파일 | 케이스 수 | 검증 대상 |
+|---|---|---|---|
+| 단위 | `EntryTokenModelTest` | 3 (추가) | visibleAt 유효성, issue의 지연 범위, isVisible |
+| 통합 | `QueueJitterIntegrationTest` | 2 | 배치 직후 상태(WAITING/READY), 지연 경과 후 READY |
+| 통합 | `OrderEntryTokenIntegrationTest` | 1 (추가) | visibleAt 이전 주문 시도 → FORBIDDEN, 토큰 유지 |
+
+### 한계
+
+- **효과 실측 미완**: k6로 Before(jitter=0)/After(jitter=500)의 주문 API 응답 시간 분포를 비교할 계획이었으나 Windows 소켓 이슈로 자동 실행 실패. 스크립트(`k6/queue-jitter-test.js`)는 준비됨.
+- **최대 지연 500ms의 근거**: 배치 간격(100ms) × 5배 — 유저 체감 지연은 무시할 수준(0.5초)이면서 배치 내 10명이 500ms에 걸쳐 흩어짐. 최적값은 실측 후 조정.
+- **클라이언트 Jitter 미도입**: 서버 강제로도 충분하다고 판단. 필요 시 클라이언트 쪽 재시도 Jitter를 추가로 얹을 수 있음.
+
+---
+
+## Step 5 — SSE 기반 순번 Push (Polling 병행)
+
+### 배경
+
+Polling으로 대기 경험은 충분히 제공되지만, "서버가 push하는" SSE 방식이 실서비스에서 어떤 트레이드오프를 갖는지 학습 목적으로 도전.
+**대체가 아니라 병행** — 기존 `GET /queue/position`(Polling)은 그대로 두고, `GET /queue/stream`을 추가한다.
+
+### 설계 결정
+
+| # | 항목 | 결정 | 근거 |
+|---|---|---|---|
+| 1 | 대체 vs 병행 | **병행** | Polling은 무상태·수평 확장 유리. SSE는 학습·데모용으로 추가 |
+| 2 | 규모 | 데모 (단일 인스턴스, 로컬 Map) | 다중 인스턴스 대응은 Redis Pub/Sub 등 추가 인프라 필요 — 범위 밖 |
+| 3 | 트리거 | **스케줄러 push** | 배치 처리 직후 상태 변화가 실제로 있는 시점 → SSE 이점을 살림 |
+| 4 | broadcast 대상 | 등록된 emitter 전원 | 데모 규모(수십~수백)면 감당 가능. 대규모는 "변화 있는 유저만" 최적화 필요 |
+| 5 | Jitter와 상호작용 | broadcast에서도 `getPosition()`을 그대로 재사용 | visibleAt 이전 유저는 SSE로도 `position` 이벤트만 받음 (일관성) |
+
+### 구현 결과
+
+```
+com.loopers.queue
+├── application
+│   ├── SsePublisher.java       Map<Long, SseEmitter> 관리, broadcast(statusProvider)
+│   ├── QueueFacade.java        + subscribe(userId), broadcastToSubscribers()
+│   └── QueueScheduler.java     admitNextBatch() 후 broadcastToSubscribers() 호출
+└── interfaces
+    └── QueueV1Controller.java  + GET /queue/stream?userId= (text/event-stream)
+```
+
+### 이벤트 스펙
+
+```
+event: position               ← WAITING 상태 (스트림 유지)
+data: {"status":"WAITING","position":342,"estimatedWaitTime":4,"pollAfter":2,...}
+
+event: ready                  ← READY 도달 (전송 후 emitter.complete)
+data: {"status":"READY","token":"abc123...","expiresAt":"..."}
+
+event: error                  ← NOT_IN_QUEUE (전송 후 complete)
+data: {"message":"대기열에 없는 유저입니다."}
+```
+
+### 동작 흐름
+
+```
+[유저] GET /queue/stream?userId=1
+     → SsePublisher.subscribe(1) → emitter 생성 + Map 등록
+     → 즉시 첫 이벤트 push (현재 상태)
+
+[스케줄러] admitNextBatch() → broadcastToSubscribers()
+     → Map 전원에게 getPosition(userId) 결과를 이벤트로 push
+     → READY 유저는 이벤트 전송 후 complete + Map 제거
+     → WAITING 유저는 스트림 유지 (다음 배치까지 대기)
+
+[유저] 연결 끊김 (탭 닫기 등)
+     → onError/onTimeout 콜백에서 Map 자동 정리
+```
+
+### 연결 관리
+
+- Timeout **30분** (`new SseEmitter(1_800_000L)`)
+- `onCompletion` / `onTimeout` / `onError` 3종 콜백에서 Map 제거
+- **같은 유저가 재구독하면 이전 emitter를 `complete()` 처리하고 새 것으로 대체**
+
+### 테스트 커버리지
+
+| 레이어 | 파일 | 케이스 수 | 검증 대상 |
+|---|---|---|---|
+| 단위 | `SsePublisherTest` | 4 | 구독 관리, 상태별 broadcast, 재구독 시 이전 emitter 정리, 다중 유저 개별 처리 |
+
+### 한계
+
+- **다중 인스턴스 불가**: Map이 서버 로컬. 유저가 서버 A에 붙었는데 스케줄러가 서버 B에서 돌면 push 도달 안 함. 실서비스는 Redis Pub/Sub이나 Kafka 브로드캐스트 필요.
+- **커넥션 유지 비용**: 톰캣 워커 스레드 200개 기준 SSE 커넥션이 스레드를 잡는다 → 200명이 한계. Reactive/WebFlux로 가면 수만 명 가능하지만 프로젝트 스택 전체 변경 필요 → 범위 밖.
+- **broadcast 부하**: 매 배치(100ms)마다 등록 유저 전원에 대해 `getPosition()` 호출 → Redis 왕복 N번. 대규모에서는 "변화가 있는 유저만" 골라내는 최적화 필요.
+
+### Polling vs SSE — 재확인
+
+| | Polling (기존) | SSE (신규) |
+|---|---|---|
+| 서버 상태 | 무상태 | Map 유지 (커넥션 상태) |
+| 확장성 | 수평 확장 쉬움 | 서버당 커넥션 상한, 다중화 시 Pub/Sub 필요 |
+| 실시간성 | 2~10초 지연 | 즉시 (배치 push) |
+| 프론트 구현 | 단순 (setInterval) | EventSource API |
+| 이번 선택 | 프로덕션 기본 | 학습·데모, 병행 옵션 |
+
+---
+
 # 진행 현황
 
 ## Step 1 체크리스트
@@ -497,7 +659,8 @@ com.loopers.queue
 
 ## Nice-to-Have (이번 주 도전 항목)
 
-- [ ] **SSE 기반 실시간 순번 Push** — Polling 대신 서버가 순번 변화를 푸시
+- [x] **SSE 기반 실시간 순번 Push** — 병행 방식으로 `GET /queue/stream` 추가 (Step 5)
 - [x] **Polling 주기 동적 조절** — 예상 대기 시간 구간별 pollAfter 응답 (10/5/2초)
 - [x] **Redis 장애 시 Fallback** — `queue.entry-token.required` kill switch로 검증 우회 가능
-- [ ] Thundering Herd 완화 (Jitter) — 배치 분산(100ms/10명)으로 부분 완화, Jitter는 스킵
+- [x] **Thundering Herd 완화 (Jitter)** — 배치 분산(100ms/10명) + 노출 시각 0~500ms 랜덤 지연 (Step 4)
+- [ ] **Jitter 효과 실측** — k6 스크립트(`k6/queue-jitter-test.js`) 준비됨. Windows 소켓 이슈로 자동 실행 실패, 로컬 실행 후 결과 반영 예정

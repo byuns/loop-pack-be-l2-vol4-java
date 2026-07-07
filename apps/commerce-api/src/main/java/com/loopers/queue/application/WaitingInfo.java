@@ -17,6 +17,11 @@ public record WaitingInfo(
         return new WaitingInfo(QueueStatus.WAITING, model.getPosition(), estimatedWaitTime, pollAfter, null, null);
     }
 
+    // 토큰은 발급됐지만 Jitter visibleAt 이전 — position=0으로 "곧 입장" 상태를 표현
+    public static WaitingInfo pendingVisibility(long remainingSeconds) {
+        return new WaitingInfo(QueueStatus.WAITING, 0L, remainingSeconds, 1L, null, null);
+    }
+
     public static WaitingInfo notInQueue() {
         return new WaitingInfo(QueueStatus.NOT_IN_QUEUE, null, null, null, null, null);
     }

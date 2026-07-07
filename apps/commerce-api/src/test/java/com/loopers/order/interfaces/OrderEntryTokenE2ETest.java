@@ -28,6 +28,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -106,7 +107,7 @@ class OrderEntryTokenE2ETest {
         void returnsOk_whenValidTokenProvided() {
             // arrange
             ProductModel product = savedProduct(100);
-            entryTokenRepository.save(new EntryTokenModel(userId, "valid-token"), TTL);
+            entryTokenRepository.save(new EntryTokenModel(userId, "valid-token", Instant.now()), TTL);
             HttpHeaders headers = authHeaders();
             headers.set("X-Entry-Token", "valid-token");
 
@@ -139,7 +140,7 @@ class OrderEntryTokenE2ETest {
         void returnsForbidden_whenTokenIsInvalid() {
             // arrange
             ProductModel product = savedProduct(100);
-            entryTokenRepository.save(new EntryTokenModel(userId, "valid-token"), TTL);
+            entryTokenRepository.save(new EntryTokenModel(userId, "valid-token", Instant.now()), TTL);
             HttpHeaders headers = authHeaders();
             headers.set("X-Entry-Token", "wrong-token");
 

@@ -17,5 +17,6 @@ public class QueueScheduler {
     @Scheduled(fixedDelayString = "${queue.scheduler.interval-ms:100}")
     public void admit() {
         queueFacade.admitNextBatch();
+        queueFacade.broadcastToSubscribers();
     }
 }

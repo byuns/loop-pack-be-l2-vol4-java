@@ -6,6 +6,7 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -13,6 +14,8 @@ import java.util.concurrent.TimeUnit;
 public class EntryTokenRepositoryImpl implements EntryTokenRepository {
 
     static final String KEY_PREFIX = "queue:token:";
+    // visibleAt(millis)와 token(UUID)을 하나의 String value에 담아 저장 — 단일 GET/SET으로 처리
+    private static final String DELIMITER = "|";
 
     private final RedisTemplate<String, String> redisTemplate;
 
@@ -22,12 +25,23 @@ public class EntryTokenRepositoryImpl implements EntryTokenRepository {
 
     @Override
     public void save(EntryTokenModel entryToken, Duration ttl) {
-        redisTemplate.opsForValue().set(key(entryToken.getUserId()), entryToken.getToken(), ttl);
+        String value = entryToken.getVisibleAt().toEpochMilli() + DELIMITER + entryToken.getToken();
+        redisTemplate.opsForValue().set(key(entryToken.getUserId()), value, ttl);
     }
 
     @Override
-    public Optional<String> findByUserId(Long userId) {
-        return Optional.ofNullable(redisTemplate.opsForValue().get(key(userId)));
+    public Optional<EntryTokenModel> findByUserId(Long userId) {
+        String value = redisTemplate.opsForValue().get(key(userId));
+        if (value == null) {
+            return Optional.empty();
+        }
+        int idx = value.indexOf(DELIMITER);
+        if (idx < 0) {
+            return Optional.empty();
+        }
+        long visibleAtMillis = Long.parseLong(value.substring(0, idx));
+        String token = value.substring(idx + 1);
+        return Optional.of(new EntryTokenModel(userId, token, Instant.ofEpochMilli(visibleAtMillis)));
     }
 
     @Override

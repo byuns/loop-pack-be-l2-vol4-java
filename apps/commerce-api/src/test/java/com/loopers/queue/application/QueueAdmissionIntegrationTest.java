@@ -145,7 +145,7 @@ class QueueAdmissionIntegrationTest {
             // assert
             assertAll(
                 () -> assertThat(info.status()).isEqualTo(QueueStatus.READY),
-                () -> assertThat(info.token()).isEqualTo(entryTokenRepository.findByUserId(1L).orElseThrow()),
+                () -> assertThat(info.token()).isEqualTo(entryTokenRepository.findByUserId(1L).orElseThrow().getToken()),
                 () -> assertThat(info.position()).isNull()
             );
         }

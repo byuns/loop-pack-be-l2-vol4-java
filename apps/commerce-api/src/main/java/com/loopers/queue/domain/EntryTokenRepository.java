@@ -11,9 +11,9 @@ public interface EntryTokenRepository {
     void save(EntryTokenModel entryToken, Duration ttl);
 
     /**
-     * 유저에게 발급된 토큰값 조회. 발급되지 않았거나 만료되었으면 empty.
+     * 유저에게 발급된 토큰 조회. 발급되지 않았거나 만료되었으면 empty.
      */
-    Optional<String> findByUserId(Long userId);
+    Optional<EntryTokenModel> findByUserId(Long userId);
 
     /**
      * 유저의 토큰 삭제 (주문 성공 시 호출).
