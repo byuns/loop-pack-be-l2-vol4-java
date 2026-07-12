@@ -10,6 +10,7 @@ import com.loopers.order.domain.OrderRepository;
 import com.loopers.order.domain.OrderService;
 import com.loopers.product.domain.ProductModel;
 import com.loopers.product.domain.ProductRepository;
+import com.loopers.queue.application.EntryTokenValidator;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
 import com.loopers.support.error.CoreException;
@@ -39,10 +40,23 @@ public class OrderFacade {
     private final CouponRepository couponRepository;
     private final CouponIssueRepository couponIssueRepository;
     private final ApplicationEventPublisher eventPublisher;
+    private final EntryTokenValidator entryTokenValidator;
 
     @Transactional
     public OrderInfo createOrder(Long userId, String loginId, List<OrderItemCommand> commands) {
         return createOrder(userId, loginId, commands, null);
+    }
+
+    /**
+     * 대기열 입장 토큰을 검증한 뒤 주문을 생성한다. 주문이 성공한 경우에만 토큰을 삭제해
+     * 실패(재고 부족 등) 시 TTL 내 재시도가 가능하다.
+     */
+    @Transactional
+    public OrderInfo createOrderWithEntryToken(Long userId, String loginId, List<OrderItemCommand> commands, Long couponId, String entryToken) {
+        entryTokenValidator.validate(userId, entryToken);
+        OrderInfo info = createOrder(userId, loginId, commands, couponId);
+        entryTokenValidator.consume(userId);
+        return info;
     }
 
     @Transactional

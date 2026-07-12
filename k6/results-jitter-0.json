@@ -1,0 +1,562 @@
+{
+    "root_group": {
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "order 2xx": {
+                    "name": "order 2xx",
+                    "path": "::order 2xx",
+                    "id": "84530211a58fe27f559d8446a66535ce",
+                    "passes": 100,
+                    "fails": 0
+                }
+            },
+        "name": ""
+    },
+    "metrics": {
+        "vus_max": {
+            "value": 100,
+            "min": 100,
+            "max": 100
+        },
+        "http_req_tls_handshaking": {
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0
+        },
+        "http_req_receiving": {
+            "p(95)": 1.5054,
+            "avg": 0.42363165991902835,
+            "min": 0,
+            "med": 0,
+            "max": 14.9461,
+            "p(90)": 1.0016
+        },
+        "http_reqs": {
+            "count": 1235,
+            "rate": 47.715147047477686
+        },
+        "http_req_blocked": {
+            "avg": 0.3674267206477734,
+            "min": 0,
+            "med": 0,
+            "max": 36.9214,
+            "p(90)": 0,
+            "p(95)": 2.0113
+        },
+        "http_req_sending": {
+            "p(90)": 0,
+            "p(95)": 1.0024,
+            "avg": 0.25531214574898786,
+            "min": 0,
+            "med": 0,
+            "max": 21.22
+        },
+        "order_success": {
+            "count": 100,
+            "rate": 3.8635746597147924
+        },
+        "data_received": {
+            "rate": 11822.306644247683,
+            "count": 305994
+        },
+        "checks": {
+            "passes": 100,
+            "fails": 0,
+            "thresholds": {
+                "rate>0.9": false
+            },
+            "value": 1
+        },
+        "data_sent": {
+            "count": 166046,
+            "rate": 6415.311179470024
+        },
+        "iteration_duration": {
+            "p(90)": 9377.42501,
+            "p(95)": 9523.535104999999,
+            "avg": 7039.322004999999,
+            "min": 1855.009,
+            "med": 7590.43915,
+            "max": 9705.7683
+        },
+        "poll_count": {
+            "p(95)": 27,
+            "avg": 9.35,
+            "min": 1,
+            "med": 8,
+            "max": 29,
+            "p(90)": 16.200000000000102
+        },
+        "iterations": {
+            "count": 100,
+            "rate": 3.8635746597147924
+        },
+        "order_latency": {
+            "min": 1159,
+            "med": 5253.5,
+            "max": 7081,
+            "p(90)": 6082.6,
+            "p(95)": 6103.95,
+            "avg": 4948.59
+        },
+        "http_req_duration": {
+            "avg": 500.3470211336032,
+            "min": 9.7128,
+            "med": 64.1959,
+            "max": 7081.2927,
+            "p(90)": 395.1492800000001,
+            "p(95)": 4575.075629999999
+        },
+        "total_latency": {
+            "avg": 7039.15,
+            "min": 1855,
+            "med": 7590.5,
+            "max": 9706,
+            "p(90)": 9377.300000000001,
+            "p(95)": 9523.1
+        },
+        "vus": {
+            "value": 23,
+            "min": 0,
+            "max": 100
+        },
+        "http_req_duration{expected_response:true}": {
+            "p(90)": 395.1492800000001,
+            "p(95)": 4575.075629999999,
+            "avg": 500.3470211336032,
+            "min": 9.7128,
+            "med": 64.1959,
+            "max": 7081.2927
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 15.7353,
+            "p(90)": 0,
+            "p(95)": 1.3131,
+            "avg": 0.22793506072874506
+        },
+        "http_req_waiting": {
+            "min": 8.8028,
+            "med": 64.1959,
+            "max": 7080.0882,
+            "p(90)": 392.4093,
+            "p(95)": 4574.491589999999,
+            "avg": 499.66807732793535
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 1235,
+            "value": 0
+        }
+    },
+    "setup_data": {
+        "users": [
+            {
+                "loginId": "k54481",
+                "userId": 100
+            },
+            {
+                "loginId": "k54482",
+                "userId": 101
+            },
+            {
+                "loginId": "k54483",
+                "userId": 102
+            },
+            {
+                "userId": 103,
+                "loginId": "k54484"
+            },
+            {
+                "loginId": "k54485",
+                "userId": 104
+            },
+            {
+                "loginId": "k54486",
+                "userId": 105
+            },
+            {
+                "loginId": "k54487",
+                "userId": 106
+            },
+            {
+                "loginId": "k54488",
+                "userId": 107
+            },
+            {
+                "loginId": "k54489",
+                "userId": 108
+            },
+            {
+                "loginId": "k544810",
+                "userId": 109
+            },
+            {
+                "loginId": "k544811",
+                "userId": 110
+            },
+            {
+                "loginId": "k544812",
+                "userId": 111
+            },
+            {
+                "loginId": "k544813",
+                "userId": 112
+            },
+            {
+                "userId": 113,
+                "loginId": "k544814"
+            },
+            {
+                "loginId": "k544815",
+                "userId": 114
+            },
+            {
+                "loginId": "k544816",
+                "userId": 115
+            },
+            {
+                "loginId": "k544817",
+                "userId": 116
+            },
+            {
+                "loginId": "k544818",
+                "userId": 117
+            },
+            {
+                "userId": 118,
+                "loginId": "k544819"
+            },
+            {
+                "loginId": "k544820",
+                "userId": 119
+            },
+            {
+                "loginId": "k544821",
+                "userId": 120
+            },
+            {
+                "loginId": "k544822",
+                "userId": 121
+            },
+            {
+                "loginId": "k544823",
+                "userId": 122
+            },
+            {
+                "loginId": "k544824",
+                "userId": 123
+            },
+            {
+                "loginId": "k544825",
+                "userId": 124
+            },
+            {
+                "loginId": "k544826",
+                "userId": 125
+            },
+            {
+                "loginId": "k544827",
+                "userId": 126
+            },
+            {
+                "loginId": "k544828",
+                "userId": 127
+            },
+            {
+                "loginId": "k544829",
+                "userId": 128
+            },
+            {
+                "loginId": "k544830",
+                "userId": 129
+            },
+            {
+                "loginId": "k544831",
+                "userId": 130
+            },
+            {
+                "loginId": "k544832",
+                "userId": 131
+            },
+            {
+                "loginId": "k544833",
+                "userId": 132
+            },
+            {
+                "loginId": "k544834",
+                "userId": 133
+            },
+            {
+                "loginId": "k544835",
+                "userId": 134
+            },
+            {
+                "loginId": "k544836",
+                "userId": 135
+            },
+            {
+                "userId": 136,
+                "loginId": "k544837"
+            },
+            {
+                "userId": 137,
+                "loginId": "k544838"
+            },
+            {
+                "loginId": "k544839",
+                "userId": 138
+            },
+            {
+                "loginId": "k544840",
+                "userId": 139
+            },
+            {
+                "loginId": "k544841",
+                "userId": 140
+            },
+            {
+                "loginId": "k544842",
+                "userId": 141
+            },
+            {
+                "loginId": "k544843",
+                "userId": 142
+            },
+            {
+                "userId": 143,
+                "loginId": "k544844"
+            },
+            {
+                "loginId": "k544845",
+                "userId": 144
+            },
+            {
+                "loginId": "k544846",
+                "userId": 145
+            },
+            {
+                "loginId": "k544847",
+                "userId": 146
+            },
+            {
+                "loginId": "k544848",
+                "userId": 147
+            },
+            {
+                "loginId": "k544849",
+                "userId": 148
+            },
+            {
+                "loginId": "k544850",
+                "userId": 149
+            },
+            {
+                "loginId": "k544851",
+                "userId": 150
+            },
+            {
+                "userId": 151,
+                "loginId": "k544852"
+            },
+            {
+                "loginId": "k544853",
+                "userId": 152
+            },
+            {
+                "loginId": "k544854",
+                "userId": 153
+            },
+            {
+                "loginId": "k544855",
+                "userId": 154
+            },
+            {
+                "loginId": "k544856",
+                "userId": 155
+            },
+            {
+                "loginId": "k544857",
+                "userId": 156
+            },
+            {
+                "loginId": "k544858",
+                "userId": 157
+            },
+            {
+                "loginId": "k544859",
+                "userId": 158
+            },
+            {
+                "userId": 159,
+                "loginId": "k544860"
+            },
+            {
+                "loginId": "k544861",
+                "userId": 160
+            },
+            {
+                "loginId": "k544862",
+                "userId": 161
+            },
+            {
+                "loginId": "k544863",
+                "userId": 162
+            },
+            {
+                "loginId": "k544864",
+                "userId": 163
+            },
+            {
+                "loginId": "k544865",
+                "userId": 164
+            },
+            {
+                "loginId": "k544866",
+                "userId": 165
+            },
+            {
+                "loginId": "k544867",
+                "userId": 166
+            },
+            {
+                "loginId": "k544868",
+                "userId": 167
+            },
+            {
+                "loginId": "k544869",
+                "userId": 168
+            },
+            {
+                "loginId": "k544870",
+                "userId": 169
+            },
+            {
+                "loginId": "k544871",
+                "userId": 170
+            },
+            {
+                "userId": 171,
+                "loginId": "k544872"
+            },
+            {
+                "loginId": "k544873",
+                "userId": 172
+            },
+            {
+                "loginId": "k544874",
+                "userId": 173
+            },
+            {
+                "loginId": "k544875",
+                "userId": 174
+            },
+            {
+                "userId": 175,
+                "loginId": "k544876"
+            },
+            {
+                "loginId": "k544877",
+                "userId": 176
+            },
+            {
+                "loginId": "k544878",
+                "userId": 177
+            },
+            {
+                "loginId": "k544879",
+                "userId": 178
+            },
+            {
+                "loginId": "k544880",
+                "userId": 179
+            },
+            {
+                "loginId": "k544881",
+                "userId": 180
+            },
+            {
+                "userId": 181,
+                "loginId": "k544882"
+            },
+            {
+                "userId": 182,
+                "loginId": "k544883"
+            },
+            {
+                "loginId": "k544884",
+                "userId": 183
+            },
+            {
+                "loginId": "k544885",
+                "userId": 184
+            },
+            {
+                "loginId": "k544886",
+                "userId": 185
+            },
+            {
+                "loginId": "k544887",
+                "userId": 186
+            },
+            {
+                "loginId": "k544888",
+                "userId": 187
+            },
+            {
+                "loginId": "k544889",
+                "userId": 188
+            },
+            {
+                "loginId": "k544890",
+                "userId": 189
+            },
+            {
+                "loginId": "k544891",
+                "userId": 190
+            },
+            {
+                "loginId": "k544892",
+                "userId": 191
+            },
+            {
+                "loginId": "k544893",
+                "userId": 192
+            },
+            {
+                "userId": 193,
+                "loginId": "k544894"
+            },
+            {
+                "loginId": "k544895",
+                "userId": 194
+            },
+            {
+                "loginId": "k544896",
+                "userId": 195
+            },
+            {
+                "loginId": "k544897",
+                "userId": 196
+            },
+            {
+                "loginId": "k544898",
+                "userId": 197
+            },
+            {
+                "loginId": "k544899",
+                "userId": 198
+            },
+            {
+                "userId": 199,
+                "loginId": "k5448100"
+            }
+        ]
+    }
+}

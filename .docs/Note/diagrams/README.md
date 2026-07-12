@@ -1,17 +1,19 @@
 # TechNote 첨부 그림 (Excalidraw)
 
-블로그 본문의 `[그림 N]` 자리에 붙일 6개 그림 스켈레톤.
+"요청을 버리지 않고 미뤄두는 법" (대기열 설계) 본문의 `[그림 N]` 자리에 붙일 8개 그림 스켈레톤.
 
 ## 파일 목록
 
 | # | 파일 | 어느 자리에 |
 |---|---|---|
-| 1 | `01-send-fail-sequence.excalidraw` | 첫 번째 실험 — broker down 시 send() 실패 |
-| 2 | `02-silent-disable.excalidraw` | 두 번째 실험 — acks=0 + idempotence=true silent disable |
-| 3 | `03-combined-vs-dedicated.excalidraw` | 세 번째 실험 — combined vs dedicated controller 구성 |
-| 4 | `04-broker-status-result.excalidraw` | 세 번째 실험 — broker 상태별 발행 결과 (RF=3, min=2) |
-| 5 | `05-throughput-latency-chart.excalidraw` | acks=all의 가격 — 처리량/지연 비교 막대 그래프 |
-| 6 | `06-outbox-absorb-flow.excalidraw` | Outbox가 흡수하는 것 — broker down→누적→복구 흐름 |
+| 1 | `01-queue-flow.excalidraw` | 도입 — 대기열 전체 흐름 (진입→폴링→스케줄러→토큰→주문) |
+| 2 | `02-three-strategies.excalidraw` | 질문 1 — 세 가지 자세 비교 (방치/거부/대기열) |
+| 3 | `03-ticketing-screen.excalidraw` | 질문 2 — 티켓팅 대기열 화면 (새로고침 시 순번 밀림 안내) |
+| 4 | `04-lua-atomicity.excalidraw` | 질문 2 — 명령 4개 따로 vs Lua 하나 원자성 비교 |
+| 5 | `05-batch-calculation.excalidraw` | 질문 3 — 배치 크기 역산 (풀 40 → 20 → 초당 100명 → 10명/100ms) |
+| 6 | `06-spike-comparison.excalidraw` | 질문 3 — 1초 100명 vs 100ms 10명 스파이크 비교 |
+| 7 | `07-token-lifecycle.excalidraw` | 질문 4 — 토큰 생명주기 (발급→검증→성공 삭제/실패 유지/만료) |
+| 8 | `08-pollafter.excalidraw` | 질문 5 — 구간별 pollAfter (멀수록 드물게) |
 
 ## 여는 방법
 
@@ -22,36 +24,33 @@
 
 ## 다듬을 때 참고
 
-- **색 팔레트**: 파랑(안전/정상), 빨강(실패/거부), 초록(성공/복구), 노랑(경고), 회색(중립)
-- **폰트**: fontFamily 1(Virgil, 손그림)이 기본. 로그·코드는 fontFamily 3(Cascadia, mono)로 이미 지정됨
+- **색 팔레트**: 파랑(안전/정상), 빨강(실패/거부), 초록(성공/허용), 노랑(경고/대기), 회색(중립)
+- **폰트**: fontFamily 1(Virgil, 손그림)이 기본. Redis 명령·코드는 fontFamily 3(mono)로 이미 지정됨
 - **그림 크기**: 블로그 본문 폭 1000~1200px에 맞춰 export 시 조절
-- **아이콘 추가**: 우측 상단 "Library" → Kafka/DB/Server 검색 가능
+- **아이콘 추가**: 우측 상단 "Library" → Redis/DB/Server 검색 가능
 
 ## 각 그림 의도 요약
 
-**그림 1** — broker가 죽어 있으면 acks 무관하게 send() 실패한다는 걸 한눈에.
-Producer(파랑) → send() 화살표 → Broker(빨강, DOWN) X 마크. 아래 설명 캡션.
+**그림 1** — 시스템 전체를 한눈에. 유저(파랑)·대기열 Redis ZSet(회색)·스케줄러(노랑)·토큰(초록)·주문 API(파랑) 5개 박스와 ①~⑥ 번호 흐름.
 
-**그림 2** — 잘못된 옵션 조합이 조용히 꺼지는 순간.
-좌측 config YAML(파랑) → "앱 시작" 화살표 → 우측 로그(노랑, `enable.idempotence = false` 강조). 아래 경고 캡션.
+**그림 2** — 트래픽 폭주 앞의 세 카드. 아무것도 없음(빨강, 붕괴) / Rate Limiting(노랑, 기회 상실) / 대기열(초록, 순서 보장). 아래에 "겹쳐 쌓는 층" 캡션.
 
-**그림 3** — 3-broker 세팅에서 combined는 왜 안 되고 dedicated는 왜 되는가.
-좌측 Combined 모드(3노드 중 2대 DOWN, 쿼럼 붕괴). 우측 Dedicated(controller 살아 있음, broker 2대만 DOWN). 결과 비교.
+**그림 3** — 티켓팅 대기열 화면 목업. 브라우저 창 안에 대기 인원·진행 바·예상 시간, 하단에 노란 경고 박스 "⚠ 새로고침하면 순번이 뒤로 밀릴 수 있습니다". 아래 캡션에서 우리 정책(순번 유지, ZADD NX)과 대비. 실제 티켓팅 서비스 캡처로 교체해도 좋음.
 
-**그림 4** — RF=3, min=2에서 broker 상태별 발행 결과 3행 카드.
-정상(초록, ISR=3 성공) → 1대 down(초록, ISR=2 성공) → 2대 down(빨강, ISR=1 거부).
+**그림 4** — 좌: 명령 4개가 따로(빨강 점선 패널) + 사이로 끼어드는 빨간 화살표. 우: Lua 한 덩어리(초록 패널) = 끼어들 틈 없음.
 
-**그림 5** — acks=1 vs acks=all 실측 막대.
-왼쪽 처리량: 26,500(파랑) vs 18,900(빨강) — "30% 감소"
-오른쪽 지연: 219(파랑) vs 467(빨강) — "2배 증가"
+**그림 5** — 역산 체인 4단계. 커넥션 풀 40(회색) → 주문 몫 20(파랑) → 초당 100명(파랑) → 100ms마다 10명(초록). 화살표 옆에 나눗셈 근거.
 
-**그림 6** — Outbox 흡수 흐름 5단계.
-① broker DOWN(빨강) → ② outbox 20건 누적(노랑) → ③ broker UP(초록) → ④ Poller 재발행(파랑) → ⑤ Kafka 20건 도착(초록).
+**그림 6** — 좌: 1초 100명 = 한계선(점선, 20)을 뚫는 빨간 기둥 하나. 우: 100ms 10명 = 한계선 아래 초록 막대 10개.
+
+**그림 7** — 토큰 상태 흐름. 발급(파랑) → 검증(회색) → 주문 처리(파랑) → 성공 시 삭제(초록) / 실패 시 유지·재시도(노랑, 되돌아가는 점선) / TTL 만료(빨강 점선 박스, 재진입).
+
+**그림 8** — 4개 구간 카드 + 위에 조회 빈도 점(●). 60초 이상(회색, 10초) → 10~60초(파랑, 5초) → 10초 미만(노랑, 2초) → READY(초록, null). 아래 입장 방향 화살표.
 
 ## 다듬는 순서 팁
 
-1. 6개 다 Excalidraw에 열어보고 전체 톤 확인
+1. 8개 다 Excalidraw에 열어보고 전체 톤 확인
 2. 어색한 요소(선 굵기, 텍스트 위치, 화살표 방향) 조정
-3. 필요하면 Excalidraw Library에서 아이콘 추가 (Kafka 로고, DB 아이콘 등)
+3. 필요하면 Library에서 아이콘 추가 (Redis 로고, DB 아이콘 등)
 4. 각 그림을 PNG(투명 배경)로 export
-5. 블로그 본문의 `[그림 N]` 자리에 순서대로 삽입
+5. 블로그 본문의 `[그림 N]` 주황 점선 박스 자리에 순서대로 삽입

@@ -1,179 +1,118 @@
-# 📝 Round 7 Quests
+# 📝 Round 8 Quests
 
 ---
 
 ## 💻 Implementation Quest
 
-> 이벤트 기반 아키텍처의 **Why → How → Scale** 을 한 주에 관통합니다.
-Spring `ApplicationEvent`로 **경계를 나누는 감각**을 익히고,
-Kafka로 **이벤트 파이프라인**을 구축한 뒤, **선착순 쿠폰 발급**에 적용합니다
+> 트래픽이 폭증하는 순간에도 시스템을 보호하면서, **유저에게 공정한 대기 경험**을 제공하는 구조를 설계하고 구현합니다.
+Redis 기반 대기열로 **처리량을 제어**하고, 입장 토큰과 실시간 순번 조회를 통해
+**"기다리는 동안에도 이탈하지 않는"** 주문 흐름을 만들어봅니다.
 > 
 
 <aside>
+
+## 전체 흐름
+
+[유저] → POST /queue/enter
+      → Redis Sorted Set에 userId + timestamp 저장
+      → 순번 응답 (e.g. 512번째)
+
+[유저] → GET /queue/position (2초마다 polling)
+      → 현재 순번 + 예상 대기 시간 응답
+
+[스케줄러] → 100ms마다 실행
+         → ZPOPMIN으로 N명 꺼내기 (Thundering Herd 완화)
+         → 입장 토큰 발급 (Redis SET + TTL 5분)
+
+[유저] → 순번 0 도달, 토큰 수신
+      → POST /orders (Header: X-Entry-Token)
+      → 토큰 검증 → 주문 처리
+      → 토큰 삭제
+
+[주문 이후] → 7주차 이벤트 파이프라인 동작
+          → ApplicationEvent → Kafka → collector
+
+
 🎯
 
 **Must-Have (이번 주에 무조건 가져가야 좋을 것-**무조건 ****하세요**)**
 
-- Event vs Command
-- Application Event
-- Kafka Producer / Consumer 기본 파이프라인
-- Transactional Outbox Pattern
-- Kafka 기반 선착순 쿠폰 발급
+- Redis Sorted Set 기반 대기열
+- 입장 토큰 발급 & 검증 (TTL)
+- 스케줄러 기반 순차 입장 처리
+- Polling 기반 순번 조회 API
 
 **Nice-To-Have (부가적으로 가져가면 좋을 것-**시간이 ****허락하면 ****꼭 ****해보세요**)**
 
-- Consumer Group 분리를 통한 관심사별 처리
-- Consumer 배치 처리
-- DLQ 구성
+- SSE 기반 실시간 순번 Push
+- Polling 주기 동적 조절 (순번 구간별)
+- Thundering Herd 완화 (발급 간격 분산 / Jitter)
+- Graceful Degradation (Redis 장애 시 Fallback)
 </aside>
 
 ### 📋 과제 정보
 
-**Step 1 — ApplicationEvent로 경계 나누기**
+**Step 1 — Redis 기반 대기열 구현**
 
-- **무조건 이벤트 분리**가 아니라, 주요 로직과 부가 로직의 경계를 판단한다.
-- 주문–결제 플로우에서 부가 로직(유저 행동 로깅, 알림 등)을 이벤트로 분리한다.
-- 좋아요–집계 플로우에서 eventual consistency를 적용한다.
-- 트랜잭션 결과와의 상관관계에 따라 적절한 리스너(`@TransactionalEventListener` phase 등)를 활용한다.
-- "이걸 이벤트로 분리해야 하는가?" 에 대한 **판단 기준** 자체가 학습 포인트다.
+- 블랙 프라이데이 행사를 앞두고, 주문 API 앞단에 **대기열 시스템**을 구축한다.
+- Redis Sorted Set을 활용해 **진입 순서를 보장**하고, **중복 진입을 방지**한다.
+- 유저는 대기열에 진입한 뒤, 자신의 **순번과 예상 대기 시간**을 조회할 수 있다.
 
-**Step 2 — Kafka 이벤트 파이프라인**
+**Step 2 — 입장 토큰 & 스케줄러**
 
-- `commerce-api` → Kafka → `commerce-collector` 구조로 확장한다.
-- Step 1에서 분리한 이벤트 중, **시스템 간 전파가 필요한 것**을 Kafka로 발행한다.
-- Producer는 **Transactional Outbox Pattern**으로 At Least Once 발행을 보장한다.
-- Consumer는 이벤트를 수집해 집계(좋아요 수 / 판매량 / 조회 수)를 `product_metrics`에 upsert한다.
+- 스케줄러가 일정 주기로 대기열에서 N명씩 꺼내 **입장 토큰을 발급**한다.
+- 토큰은 **TTL**이 있어 일정 시간 내 사용하지 않으면 자동 만료된다.
+- 토큰이 있는 유저만 주문 API에 진입할 수 있으며, 주문 완료 후 토큰은 삭제된다.
+- 처리량 설계 기준(DB 커넥션 풀, 평균 처리 시간)을 바탕으로 **스케줄러의 배치 크기를 산정**한다.
 
-**Step 3 — Kafka 기반 선착순 쿠폰 발급**
+**Step 3 — 실시간 순번 조회**
 
-- Step 2에서 익힌 Kafka를 **실전 시나리오**에 적용한다.
-- API는 발급 요청을 Kafka에 발행만 하고, Consumer가 실제 쿠폰을 발급한다.
-- 발급 수량 제한(e.g. 선착순 100명)에 대한 **동시성 제어**를 구현한다.
+- 유저가 대기 중 **현재 순번과 예상 대기 시간**을 실시간으로 확인할 수 있는 API를 구현한다.
+- Polling 기반으로 구현하되, 대기 인원에 따른 **Polling 부하**를 고려한다.
 
-**토픽 설계** (예시)
+**주문 이후 흐름**
 
-- `catalog-events` (상품/재고/좋아요 이벤트, key=productId)
-- `order-events` (주문/결제 이벤트, key=orderId)
-- `coupon-issue-requests` (쿠폰 발급 요청, key=couponId)
-
-**Producer, Consumer 필수 처리**
-
-- **Producer**
-    - acks=all, idempotence=true 설정
-- **Consumer**
-    - **manual Ack** 처리
-    - `event_handled(event_id PK)` (DB or Redis) 기반의 멱등 처리
-    - `version` 또는 `updated_at` 기준으로 최신 이벤트만 반영
-
-> *왜 이벤트 핸들링 테이블과 로그 테이블을 분리하는 걸까? 에 대해 고민해보자*
-> 
+- 대기열은 **주문 API 앞단의 관문**이다.
+- 주문 API 이후의 흐름(이벤트 발행, Kafka 파이프라인, Metrics 집계)은 **R7에서 구축한 구조를 그대로 활용**한다.
 
 ---
 
 ## ✅ Checklist
 
-### 🧾 Step 1 — ApplicationEvent
+### 🚪 Step 1 — 대기열
 
-- [ ]  주문–결제 플로우에서 부가 로직을 이벤트 기반으로 분리한다.
-- [ ]  좋아요 처리와 집계를 이벤트 기반으로 분리한다. (집계 실패와 무관하게 좋아요는 성공)
-- [ ]  유저 행동(조회, 클릭, 좋아요, 주문 등)에 대한 서버 레벨 로깅을 이벤트로 처리한다.
-- [ ]  동작의 주체를 적절하게 분리하고, 트랜잭션 간의 연관관계를 고민해 봅니다.
+- [ ]  Redis Sorted Set 기반 대기열 진입 API 구현 (`POST /queue/enter`)
+- [ ]  순번 조회 API 구현 (`GET /queue/position`)
+- [ ]  userId 기반 중복 진입 방지
+- [ ]  전체 대기 인원 조회
 
-### 🎾 Step 2 — Kafka Producer / Consumer
+### 🎫 Step 2 — 입장 토큰 & 스케줄러
 
-- [ ]  Step 1의 ApplicationEvent 중 **시스템 간 전파가 필요한 이벤트**를 Kafka로 발행한다.
-- [ ]  `acks=all`, `idempotence=true` 설정
-- [ ]  **Transactional Outbox Pattern** 구현
-- [ ]  PartitionKey 기반 이벤트 순서 보장
-- [ ]  Consumer가 Metrics 집계 처리 (product_metrics upsert)
-- [ ]  `event_handled` 테이블을 통한 멱등 처리 구현
-- [ ]  manual Ack + `version`/`updated_at` 기준 최신 이벤트만 반영
+- [ ]  스케줄러가 주기적으로 대기열에서 N명을 꺼내 입장 토큰 발급
+- [ ]  토큰 TTL 설정 (e.g. 5분)
+- [ ]  주문 API 진입 시 토큰 검증
+- [ ]  주문 완료 후 토큰 삭제
+- [ ]  처리량 기준으로 스케줄러 배치 크기 산정 근거 문서화
 
-### 🎫 Step 3 — 선착순 쿠폰 발급
+### 📡 Step 3 — 실시간 순번 조회
 
-- [ ]  쿠폰 발급 요청 API → Kafka 발행 (비동기 처리)
-- [ ]  Consumer에서 선착순 수량 제한 + 중복 발급 방지 구현
-- [ ]  발급 완료/실패 결과를 유저가 확인할 수 있는 구조 설계 (polling or callback)
-- [ ]  동시성 테스트 — 수량 초과 발급이 발생하지 않는지 검증
+- [ ]  예상 대기 시간 계산 로직 구현
+- [ ]  Polling 기반 순번 + 예상 대기 시간 응답
+- [ ]  토큰 발급 시 순번 조회 응답에 토큰 포함
+
+### 🧪 검증
+
+- [ ]  동시 진입 테스트 — 대기열 순서가 정확히 보장되는지 확인
+- [ ]  토큰 만료 테스트 — TTL 초과 시 토큰이 무효화되는지 확인
+- [ ]  처리량 초과 테스트 — 스케줄러 배치 크기 이상의 요청이 들어와도 시스템이 안정적인지 확인
 
 ---
 
-## ✍️ Technical Writing Quest
-
-> **피드백 & 라이팅 과제 - 테크노트 or 블로그** 중 편한 방법으로 작성하고, 해당 링크를 제출해주시면 멘토님들이 이를 기반으로 피드백 및 RT 선정을 진행합니다.
-> 
-
-### 1️⃣ **GitHub Issues → New issue →** `4개 포맷` **중 선택해서 작성**
-
-1. 📐 **Design Doc :** 설계 의사결정 중심
-2. 🪞 **Retrospective :** 과제 회고·트러블슈팅
-3. **⚔️ Challenge Story** : 도전 → 해결 압축 서사
-4. 📊 **Benchmark Report** : A vs B 직접 측정
-
-> 본문 골격이 템플릿에 따라 미리 채워져 있어요. 안 쓰는 섹션은 통째로 지우면 됩니다.
-> 
-> 
-> ```
-> [포맷] 키워드 (N주차 · K팀 · 이름)
-> ```
-> 
-
-**왜 도입했나요?**이직·고과·면접에서 활용할 본인의 글쓰기 자산을 만드는 연습 트랙이에요. 잘 쓴 글은 멘토진이 RT 를 주거나 혹은 리뷰 시간에 소개해줄 거예요.**Issue 로 과제 시작하기**
-
-- **Java**: https://github.com/loopers-labs/loop-pack-be-l2-vol4-java/issues/new/choose
-- **Kotlin**: https://github.com/loopers-labs/loop-pack-be-l2-vol4-kotlin/issues/new/choose
-
-**가이드: 위 페이지의 "Tech Note 작성 가이드" 링크 참고**
-
-### 2️⃣ **Blog 에** `이번 주차 관련된 내용` **을 기반으로 자유 작성**
-
-> 이번 주에 학습한 내용, 과제 진행을 되돌아보며
-**"내가 어떤 판단을 하고 왜 그렇게 구현했는지"** 를 글로 정리해봅니다.
-> 
-> 
-> **좋은 블로그 글은 내가 겪은 문제를, 타인도 공감할 수 있게 정리한 글입니다.**
-> 
-> 이 글은 단순 과제가 아니라, **향후 이직에 도움이 될 수 있는 포트폴리오** 가 될 수 있어요.
-> 
-- Blog 작성 Tips!
-    
-    ### ✅ 작성 기준
-    
-    | 항목 | 설명 |
-    | --- | --- |
-    | **형식** | 블로그 |
-    | **길이** | 제한 없음, 단 꼭 **1줄 요약 (TL;DR)** 을 포함해 주세요 |
-    | **포인트** | “무엇을 했다” 보다 **“왜 그렇게 판단했는가”** 중심 |
-    | **예시 포함** | 코드 비교, 흐름도, 리팩토링 전후 예시 등 자유롭게 |
-    | **톤** | 실력은 보이지만, 자만하지 않고, **고민이 읽히는 글**예: “처음엔 mock으로 충분하다고 생각했지만, 나중에 fake로 교체하게 된 이유는…” |
-    
-    ---
-    
-    ### ✨ 좋은 톤은 이런 느낌이에요
-    
-    > 내가 겪은 실전적 고민을 다른 개발자도 공감할 수 있게 풀어내자
-    > 
-    
-    | 특징 | 예시 |
-    | --- | --- |
-    | 🤔 내 언어로 설명한 개념 | Stub과 Mock의 차이를 이번 주문 테스트에서 처음 실감했다 |
-    | 💭 판단 흐름이 드러나는 글 | 처음엔 도메인을 나누지 않았는데, 테스트가 어려워지며 분리했다 |
-    | 📐 정보 나열보다 인사이트 중심 | 테스트는 작성했지만, 구조는 만족스럽지 않다. 다음엔… |
-    
-    ### ❌ 피해야 할 스타일
-    
-    | 예시 | 이유 |
-    | --- | --- |
-    | 많이 부족했고, 반성합니다… | 회고가 아니라 일기처럼 보입니다 |
-    | Stub은 응답을 지정하고… | 내 생각이 아닌 요약문처럼 보입니다 |
-    | 테스트가 진리다 | 너무 단정적이거나 오만해 보입니다 |
-
 **주제 추천**
 
-- ApplicationEvent만으로 충분한 경계 vs Kafka가 필요한 경계, 그 기준은?
-- 트랜잭션 안에 다 넣을 수 있지만, 굳이 나누는 이유
-- 좋아요는 동기, 집계는 비동기 — 상품의 좋아요 수가 바로 반영되어야 할까?
-- Outbox Pattern 없이 Kafka만 쓰면 어떤 일이 벌어질까?
-- 선착순 쿠폰을 Redis로 처리하는 것과 Kafka로 처리하는 것의 차이
-- 100장 한정 쿠폰에 1만 명이 동시에 요청하면?
-- 멱등 처리를 DB로 할 때와 Redis로 할 때의 트레이드오프
+- Rate Limiting으로 거부하는 것과 대기열로 줄 세우는 것, 어떤 상황에서 어떤 전략이 맞을까?
+- 스케줄러 배치 크기를 어떻게 산정했는가? 그 근거는?
+- Thundering Herd를 직접 겪었다면, 어떻게 완화했는가?
+- Redis가 죽으면 우리 서비스는 어떻게 되어야 하는가?
+- Polling vs SSE — 왜 그 방식을 선택했는가?
+- 토큰 TTL을 몇 분으로 설정했고, 그 기준은 무엇인가?

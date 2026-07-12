@@ -23,6 +23,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.TestPropertySource;
 
 import java.time.LocalDate;
 import java.util.List;
@@ -32,6 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+// 이 테스트는 주문 흐름 자체를 검증하므로 입장 토큰 게이트는 비활성화 (토큰 검증은 OrderEntryTokenE2ETest에서 담당)
+@TestPropertySource(properties = "queue.entry-token.required=false")
 class OrderV1ApiE2ETest {
 
     private static final String ENDPOINT = "/api/v1/orders";
