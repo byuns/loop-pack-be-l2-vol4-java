@@ -29,6 +29,13 @@ demo-kafka:
   test:
     topic-name: demo.internal.topic-v1
 
+# 랭킹 점수 가중치 — 재배포 없이(설정 변경/재기동) 조절 가능 (Nice-to-Have: 실시간 Weight 조절)
+ranking:
+  weight:
+    view: 0.1
+    like: 0.2
+    order: 0.6
+
 ---
 spring:
   config:

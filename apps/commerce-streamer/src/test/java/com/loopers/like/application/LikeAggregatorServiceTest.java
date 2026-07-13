@@ -6,6 +6,7 @@ import com.loopers.metrics.domain.ProductMetricsModel;
 import com.loopers.metrics.domain.ProductMetricsRepository;
 import com.loopers.ranking.domain.RankingScoreEvent;
 import com.loopers.ranking.domain.RankingScorePolicy;
+import com.loopers.ranking.domain.RankingWeightProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -33,7 +34,8 @@ class LikeAggregatorServiceTest {
         eventHandledRepository = mock(EventHandledRepository.class);
         eventPublisher = mock(ApplicationEventPublisher.class);
         likeAggregatorService = new LikeAggregatorService(
-            productMetricsRepository, eventHandledRepository, eventPublisher, new RankingScorePolicy());
+            productMetricsRepository, eventHandledRepository, eventPublisher,
+            new RankingScorePolicy(new RankingWeightProperties(0.1, 0.2, 0.6)));
     }
 
     @DisplayName("handleLikeAdded를 호출할 때,")

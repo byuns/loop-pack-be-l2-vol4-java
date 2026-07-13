@@ -5,6 +5,7 @@ import com.loopers.eventhandled.domain.EventHandledRepository;
 import com.loopers.metrics.domain.ProductMetricsRepository;
 import com.loopers.ranking.domain.RankingScoreEvent;
 import com.loopers.ranking.domain.RankingScorePolicy;
+import com.loopers.ranking.domain.RankingWeightProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -25,7 +26,8 @@ class SalesAggregatorServiceTest {
     private ProductMetricsRepository productMetricsRepository;
     private EventHandledRepository eventHandledRepository;
     private ApplicationEventPublisher eventPublisher;
-    private final RankingScorePolicy scorePolicy = new RankingScorePolicy();
+    private final RankingScorePolicy scorePolicy =
+        new RankingScorePolicy(new RankingWeightProperties(0.1, 0.2, 0.6));
     private SalesAggregatorService salesAggregatorService;
 
     @BeforeEach
