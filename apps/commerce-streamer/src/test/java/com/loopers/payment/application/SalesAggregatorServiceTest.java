@@ -43,8 +43,8 @@ class SalesAggregatorServiceTest {
 
             // act
             salesAggregatorService.handleOrderConfirmed(eventId, List.of(
-                new SalesItem(1L, 2L),
-                new SalesItem(2L, 1L)
+                new SalesItem(1L, 2L, 1000L),
+                new SalesItem(2L, 1L, 5000L)
             ));
 
             // assert
@@ -61,7 +61,7 @@ class SalesAggregatorServiceTest {
             when(eventHandledRepository.existsByEventId(eventId)).thenReturn(true);
 
             // act
-            salesAggregatorService.handleOrderConfirmed(eventId, List.of(new SalesItem(1L, 2L)));
+            salesAggregatorService.handleOrderConfirmed(eventId, List.of(new SalesItem(1L, 2L, 1000L)));
 
             // assert
             verify(eventHandledRepository, never()).save(any());

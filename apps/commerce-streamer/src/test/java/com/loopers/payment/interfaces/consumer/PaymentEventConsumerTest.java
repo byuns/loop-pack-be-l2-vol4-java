@@ -43,13 +43,13 @@ class PaymentEventConsumerTest {
     @Nested
     class OnMessage {
 
-        @DisplayName("ORDER_CONFIRMED를 수신하면, items를 파싱해 집계 서비스를 호출하고 ack한다.")
+        @DisplayName("ORDER_CONFIRMED를 수신하면, items를 (productId, quantity, price)로 파싱해 집계 서비스를 호출하고 ack한다.")
         @Test
         void callsServiceAndAcks_whenOrderConfirmed() throws Exception {
             // arrange
             String value = """
                 {"eventType":"ORDER_CONFIRMED","orderId":123,
-                 "items":[{"productId":1,"quantity":2},{"productId":2,"quantity":1}]}
+                 "items":[{"productId":1,"quantity":2,"price":1000},{"productId":2,"quantity":1,"price":5000}]}
                 """;
 
             // act
@@ -59,8 +59,8 @@ class PaymentEventConsumerTest {
             ArgumentCaptor<List<SalesItem>> captor = ArgumentCaptor.forClass(List.class);
             verify(salesAggregatorService).handleOrderConfirmed(eq("order:123"), captor.capture());
             assertThat(captor.getValue()).containsExactly(
-                new SalesItem(1L, 2L),
-                new SalesItem(2L, 1L)
+                new SalesItem(1L, 2L, 1000L),
+                new SalesItem(2L, 1L, 5000L)
             );
             verify(ack).acknowledge();
         }
@@ -83,7 +83,7 @@ class PaymentEventConsumerTest {
         @Test
         void propagatesAndDoesNotAck_whenServiceThrows() {
             // arrange
-            String value = "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":123,\"items\":[{\"productId\":1,\"quantity\":2}]}";
+            String value = "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":123,\"items\":[{\"productId\":1,\"quantity\":2,\"price\":1000}]}";
             doThrow(new RuntimeException("DB down"))
                 .when(salesAggregatorService).handleOrderConfirmed(any(), any());
 
