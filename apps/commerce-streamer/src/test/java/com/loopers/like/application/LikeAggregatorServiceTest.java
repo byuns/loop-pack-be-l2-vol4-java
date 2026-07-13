@@ -1,4 +1,4 @@
-package com.loopers.view.application;
+package com.loopers.like.application;
 
 import com.loopers.eventhandled.domain.EventHandledModel;
 import com.loopers.eventhandled.domain.EventHandledRepository;
@@ -14,82 +14,85 @@ import org.springframework.context.ApplicationEventPublisher;
 
 import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class ViewAggregatorServiceTest {
+class LikeAggregatorServiceTest {
 
     private ProductMetricsRepository productMetricsRepository;
     private EventHandledRepository eventHandledRepository;
     private ApplicationEventPublisher eventPublisher;
-    private ViewAggregatorService viewAggregatorService;
+    private LikeAggregatorService likeAggregatorService;
 
     @BeforeEach
     void setUp() {
         productMetricsRepository = mock(ProductMetricsRepository.class);
         eventHandledRepository = mock(EventHandledRepository.class);
         eventPublisher = mock(ApplicationEventPublisher.class);
-        viewAggregatorService = new ViewAggregatorService(
+        likeAggregatorService = new LikeAggregatorService(
             productMetricsRepository, eventHandledRepository, eventPublisher, new RankingScorePolicy());
     }
 
-    @DisplayName("handleProductViewed를 호출할 때,")
+    @DisplayName("handleLikeAdded를 호출할 때,")
     @Nested
-    class HandleProductViewed {
+    class HandleLikeAdded {
 
-        @DisplayName("신규 eventId면, view_count를 반영하고 event_handled에 기록하며 랭킹 점수(0.1) 이벤트를 발행한다.")
+        @DisplayName("신규 eventId면, like_count를 증가시키고 랭킹 점수(+0.2) 이벤트를 발행한다.")
         @Test
-        void appliesViewAndRecords_whenNewEventId() {
+        void incrementsLikeAndPublishes_whenNewEventId() {
             // arrange
-            String eventId = "catalog-events:0:10";
+            String eventId = "catalog-events:0:20";
             ProductMetricsModel metrics = new ProductMetricsModel(1L);
             when(eventHandledRepository.existsByEventId(eventId)).thenReturn(false);
             when(productMetricsRepository.findByProductId(1L)).thenReturn(Optional.of(metrics));
 
             // act
-            viewAggregatorService.handleProductViewed(eventId, 1L, 1000L);
+            likeAggregatorService.handleLikeAdded(eventId, 1L);
 
             // assert
-            assertThat(metrics.getViewCount()).isEqualTo(1L);
             verify(eventHandledRepository).save(any(EventHandledModel.class));
             verify(productMetricsRepository).save(metrics);
-            verify(eventPublisher).publishEvent(new RankingScoreEvent(1L, 0.1));
+            verify(eventPublisher).publishEvent(new RankingScoreEvent(1L, 0.2));
         }
 
-        @DisplayName("이미 처리된 eventId면, 아무 집계도 하지 않고 중복 기록도 랭킹 이벤트도 남기지 않는다.")
+        @DisplayName("이미 처리된 eventId면, 집계도 랭킹 이벤트도 하지 않는다.")
         @Test
-        void skips_whenEventIdAlreadyHandled() {
+        void skips_whenAlreadyHandled() {
             // arrange
-            String eventId = "catalog-events:0:10";
+            String eventId = "catalog-events:0:20";
             when(eventHandledRepository.existsByEventId(eventId)).thenReturn(true);
 
             // act
-            viewAggregatorService.handleProductViewed(eventId, 1L, 1000L);
+            likeAggregatorService.handleLikeAdded(eventId, 1L);
 
             // assert
             verify(eventHandledRepository, never()).save(any());
-            verify(productMetricsRepository, never()).findByProductId(any());
-            verify(productMetricsRepository, never()).save(any());
             verify(eventPublisher, never()).publishEvent(any());
         }
+    }
 
-        @DisplayName("product_metrics가 없으면, 새로 생성한 뒤 view_count를 반영한다.")
+    @DisplayName("handleLikeCancelled를 호출할 때,")
+    @Nested
+    class HandleLikeCancelled {
+
+        @DisplayName("신규 eventId면, like_count를 감소시키고 랭킹 점수(-0.2) 이벤트를 발행한다.")
         @Test
-        void createsMetrics_whenNotExists() {
+        void decrementsLikeAndPublishes_whenNewEventId() {
             // arrange
-            String eventId = "catalog-events:0:10";
+            String eventId = "catalog-events:0:21";
+            ProductMetricsModel metrics = new ProductMetricsModel(1L);
             when(eventHandledRepository.existsByEventId(eventId)).thenReturn(false);
-            when(productMetricsRepository.findByProductId(99L)).thenReturn(Optional.empty());
+            when(productMetricsRepository.findByProductId(1L)).thenReturn(Optional.of(metrics));
 
             // act
-            viewAggregatorService.handleProductViewed(eventId, 99L, 1000L);
+            likeAggregatorService.handleLikeCancelled(eventId, 1L);
 
             // assert
-            verify(productMetricsRepository).save(any(ProductMetricsModel.class));
+            verify(productMetricsRepository).save(metrics);
+            verify(eventPublisher).publishEvent(new RankingScoreEvent(1L, -0.2));
         }
     }
 }
