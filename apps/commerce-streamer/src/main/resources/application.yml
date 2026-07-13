@@ -35,6 +35,10 @@ ranking:
     view: 0.1
     like: 0.2
     order: 0.6
+  # 콜드 스타트 완화 — 23:50에 오늘 Top-N을 감쇠해 내일 키에 밑그림으로 적재
+  carryover:
+    decay: 0.1
+    top-n: 500
 
 ---
 spring:
