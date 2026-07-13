@@ -29,8 +29,11 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class RankingV1ApiE2ETest {
 
-    private static final String TODAY = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+    private static final DateTimeFormatter YYYYMMDD = DateTimeFormatter.ofPattern("yyyyMMdd");
+    private static final String TODAY = LocalDate.now().format(YYYYMMDD);
+    private static final String YESTERDAY = LocalDate.now().minusDays(1).format(YYYYMMDD);
     private static final String KEY = "ranking:all:" + TODAY;
+    private static final String YESTERDAY_KEY = "ranking:all:" + YESTERDAY;
 
     @Autowired
     private TestRestTemplate testRestTemplate;
@@ -48,6 +51,7 @@ class RankingV1ApiE2ETest {
     void tearDown() {
         databaseCleanUp.truncateAllTables();
         redisTemplate.delete(KEY);
+        redisTemplate.delete(YESTERDAY_KEY);
     }
 
     @DisplayName("GET /api/v1/rankings")
@@ -79,6 +83,89 @@ class RankingV1ApiE2ETest {
                 () -> assertThat(data.get(0).name()).isEqualTo("조던1"),
                 () -> assertThat(data.get(1).rank()).isEqualTo(2L),
                 () -> assertThat(data.get(1).productId()).isEqualTo(a.getId())
+            );
+        }
+    }
+
+    @DisplayName("GET /api/v1/rankings — 과거 날짜")
+    @Nested
+    class GetPastRankings {
+
+        @DisplayName("일자가 바뀌어도 date로 어제 키를 지정하면, 어제 랭킹이 정상 반환된다.")
+        @Test
+        void returnsYesterdayRanking_whenPastDateRequested() {
+            // arrange — 어제 키에만 seed
+            ProductModel a = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
+            redisTemplate.opsForZSet().add(YESTERDAY_KEY, String.valueOf(a.getId()), 5.0);
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings?date=" + YESTERDAY + "&page=1&size=20",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert
+            List<RankingV1Dto.RankingResponse> data = response.getBody().data();
+            assertAll(
+                () -> assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK),
+                () -> assertThat(data).hasSize(1),
+                () -> assertThat(data.get(0).rank()).isEqualTo(1L),
+                () -> assertThat(data.get(0).productId()).isEqualTo(a.getId())
+            );
+        }
+
+        @DisplayName("오늘·어제 키가 공존해도, date로 지정한 날짜의 랭킹만 반환된다(키 격리).")
+        @Test
+        void returnsOnlyRequestedDate_whenBothKeysExist() {
+            // arrange — 오늘엔 a, 어제엔 b
+            ProductModel a = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
+            ProductModel b = productJpaRepository.save(new ProductModel("조던1", "나이키 농구화", 200000L, null));
+            redisTemplate.opsForZSet().add(KEY, String.valueOf(a.getId()), 1.0);
+            redisTemplate.opsForZSet().add(YESTERDAY_KEY, String.valueOf(b.getId()), 1.0);
+
+            // act — 어제로 조회
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings?date=" + YESTERDAY + "&page=1&size=20",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert — 어제 키의 b만 반환(오늘 a는 섞이지 않음)
+            List<RankingV1Dto.RankingResponse> data = response.getBody().data();
+            assertAll(
+                () -> assertThat(data).hasSize(1),
+                () -> assertThat(data.get(0).productId()).isEqualTo(b.getId())
+            );
+        }
+    }
+
+    @DisplayName("GET /api/v1/rankings — 가중치 순서")
+    @Nested
+    class GetRankingsByWeight {
+
+        @DisplayName("주문 1건(점수) 상품이 좋아요 3건 상품보다 상위(rank=1)로 반환된다.")
+        @Test
+        void orderOutranksThreeLikes_whenWeightApplied() {
+            // arrange — 설계 가중치식 그대로: 주문 1건(1만원) vs 좋아요 3건
+            double orderScore = 0.6 * Math.log10(1 + 10000.0); // ≈ 2.4
+            double threeLikesScore = 0.2 * 3;                   // = 0.6
+            ProductModel ordered = productJpaRepository.save(new ProductModel("주문상품", "주문 1건", 10000L, null));
+            ProductModel liked = productJpaRepository.save(new ProductModel("좋아요상품", "좋아요 3건", 10000L, null));
+            redisTemplate.opsForZSet().add(KEY, String.valueOf(ordered.getId()), orderScore);
+            redisTemplate.opsForZSet().add(KEY, String.valueOf(liked.getId()), threeLikesScore);
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings?date=" + TODAY + "&page=1&size=20",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert — 주문상품이 1위
+            List<RankingV1Dto.RankingResponse> data = response.getBody().data();
+            assertAll(
+                () -> assertThat(data).hasSize(2),
+                () -> assertThat(data.get(0).productId()).isEqualTo(ordered.getId()),
+                () -> assertThat(data.get(0).rank()).isEqualTo(1L),
+                () -> assertThat(data.get(1).productId()).isEqualTo(liked.getId())
             );
         }
     }

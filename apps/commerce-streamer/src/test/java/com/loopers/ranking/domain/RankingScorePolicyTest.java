@@ -48,5 +48,16 @@ class RankingScorePolicyTest {
         void orderScoreIsZero_whenAmountIsZero() {
             assertThat(policy.orderScore(0L, 5L)).isEqualTo(0.0);
         }
+
+        @DisplayName("가중치가 순서에 반영된다 — 주문 1건(1만원)이 좋아요 3건보다 점수가 높다.")
+        @Test
+        void orderOutweighsThreeLikes() {
+            // arrange
+            double orderScore = policy.orderScore(10000L, 1L);
+            double threeLikesScore = policy.likeAddedScore() * 3;
+
+            // act & assert
+            assertThat(orderScore).isGreaterThan(threeLikesScore);
+        }
     }
 }
