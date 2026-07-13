@@ -19,7 +19,7 @@ public class ProductV1Dto {
         }
     }
 
-    public record ProductResponse(Long id, String name, String description, Long price, Integer stock, Long brandId, String brandName, Long likeCount) {
+    public record ProductResponse(Long id, String name, String description, Long price, Integer stock, Long brandId, String brandName, Long likeCount, Long rank) {
         public static ProductResponse from(ProductInfo info) {
             return new ProductResponse(
                 info.id(),
@@ -29,7 +29,8 @@ public class ProductV1Dto {
                 info.stock(),
                 info.brandId(),
                 info.brandName(),
-                info.likeCount()
+                info.likeCount(),
+                info.rank()
             );
         }
     }
