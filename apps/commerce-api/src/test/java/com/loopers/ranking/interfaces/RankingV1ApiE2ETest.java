@@ -34,6 +34,7 @@ class RankingV1ApiE2ETest {
     private static final String YESTERDAY = LocalDate.now().minusDays(1).format(YYYYMMDD);
     private static final String KEY = "ranking:all:" + TODAY;
     private static final String YESTERDAY_KEY = "ranking:all:" + YESTERDAY;
+    private static final String HOURLY_KEY = "ranking:hourly:current";
 
     @Autowired
     private TestRestTemplate testRestTemplate;
@@ -52,6 +53,7 @@ class RankingV1ApiE2ETest {
         databaseCleanUp.truncateAllTables();
         redisTemplate.delete(KEY);
         redisTemplate.delete(YESTERDAY_KEY);
+        redisTemplate.delete(HOURLY_KEY);
     }
 
     @DisplayName("GET /api/v1/rankings")
@@ -166,6 +168,79 @@ class RankingV1ApiE2ETest {
                 () -> assertThat(data.get(0).productId()).isEqualTo(ordered.getId()),
                 () -> assertThat(data.get(0).rank()).isEqualTo(1L),
                 () -> assertThat(data.get(1).productId()).isEqualTo(liked.getId())
+            );
+        }
+    }
+
+    @DisplayName("GET /api/v1/rankings/hourly")
+    @Nested
+    class GetHourlyRankings {
+
+        @DisplayName("롤링 키에 점수가 있으면, 200과 점수 내림차순 랭킹 목록(상품정보 포함)을 반환한다.")
+        @Test
+        void returnsHourlyRankingList_whenValidRequest() {
+            // arrange — 시간 롤링 키에 seed
+            ProductModel a = productJpaRepository.save(new ProductModel("에어맥스", "나이키 운동화", 150000L, null));
+            ProductModel b = productJpaRepository.save(new ProductModel("조던1", "나이키 농구화", 200000L, null));
+            redisTemplate.opsForZSet().add(HOURLY_KEY, String.valueOf(a.getId()), 3.0);
+            redisTemplate.opsForZSet().add(HOURLY_KEY, String.valueOf(b.getId()), 9.0);
+
+            // act
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings/hourly?page=1&size=20",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert — b(9.0)가 1위
+            List<RankingV1Dto.RankingResponse> data = response.getBody().data();
+            assertAll(
+                () -> assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK),
+                () -> assertThat(data).hasSize(2),
+                () -> assertThat(data.get(0).rank()).isEqualTo(1L),
+                () -> assertThat(data.get(0).productId()).isEqualTo(b.getId()),
+                () -> assertThat(data.get(1).productId()).isEqualTo(a.getId())
+            );
+        }
+
+        @DisplayName("롤링 키가 비어 있으면, 200과 빈 목록을 반환한다.")
+        @Test
+        void returnsEmptyList_whenNoHourlyRanking() {
+            // act
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings/hourly?page=1&size=20",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert
+            assertAll(
+                () -> assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK),
+                () -> assertThat(response.getBody().data()).isEmpty()
+            );
+        }
+
+        @DisplayName("page/size로 페이징하면, 해당 구간의 랭킹만 반환된다.")
+        @Test
+        void paginates_whenPageAndSizeGiven() {
+            // arrange — 3개 상품을 점수순으로 seed (c=9 > b=5 > a=1)
+            ProductModel a = productJpaRepository.save(new ProductModel("A", "1위 아님", 1000L, null));
+            ProductModel b = productJpaRepository.save(new ProductModel("B", "2위", 1000L, null));
+            ProductModel c = productJpaRepository.save(new ProductModel("C", "1위", 1000L, null));
+            redisTemplate.opsForZSet().add(HOURLY_KEY, String.valueOf(a.getId()), 1.0);
+            redisTemplate.opsForZSet().add(HOURLY_KEY, String.valueOf(b.getId()), 5.0);
+            redisTemplate.opsForZSet().add(HOURLY_KEY, String.valueOf(c.getId()), 9.0);
+
+            // act — size=1, page=2 → 2위(b)만
+            ParameterizedTypeReference<ApiResponse<List<RankingV1Dto.RankingResponse>>> responseType = new ParameterizedTypeReference<>() {};
+            ResponseEntity<ApiResponse<List<RankingV1Dto.RankingResponse>>> response =
+                testRestTemplate.exchange("/api/v1/rankings/hourly?page=2&size=1",
+                    HttpMethod.GET, new HttpEntity<>(null), responseType);
+
+            // assert — 2위 b, rank=2
+            List<RankingV1Dto.RankingResponse> data = response.getBody().data();
+            assertAll(
+                () -> assertThat(data).hasSize(1),
+                () -> assertThat(data.get(0).productId()).isEqualTo(b.getId()),
+                () -> assertThat(data.get(0).rank()).isEqualTo(2L)
             );
         }
     }

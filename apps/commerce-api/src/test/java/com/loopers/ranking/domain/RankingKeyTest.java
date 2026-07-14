@@ -18,4 +18,14 @@ class RankingKeyTest {
         // assert
         assertThat(key).isEqualTo("ranking:all:20260713");
     }
+
+    @DisplayName("시간 랭킹 롤링 키는 고정 상수 ranking:hourly:current 이다.")
+    @Test
+    void hourlyCurrentKeyIsConstant() {
+        // act
+        String key = RankingKey.hourlyCurrent();
+
+        // assert
+        assertThat(key).isEqualTo("ranking:hourly:current");
+    }
 }

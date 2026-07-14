@@ -39,6 +39,9 @@ ranking:
   carryover:
     decay: 0.1
     top-n: 500
+  # 시간 단위(1시간) 실시간 랭킹 — 최근 window-minutes개 분 버킷을 1분마다 사전 합산
+  hourly:
+    window-minutes: 60
 
 ---
 spring:
