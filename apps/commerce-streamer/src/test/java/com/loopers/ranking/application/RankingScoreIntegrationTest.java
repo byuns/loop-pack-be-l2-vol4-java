@@ -18,6 +18,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -67,6 +68,19 @@ class RankingScoreIntegrationTest {
         return redisTemplate.opsForZSet().score(KEY, String.valueOf(productId));
     }
 
+    // 현재/직전 분 버킷 중 리스너가 기록한 쪽의 점수(분 경계 flake 방지)
+    private double minuteBucketScore(long productId) {
+        LocalDateTime now = LocalDateTime.now();
+        double sum = 0.0;
+        for (LocalDateTime m : List.of(now, now.minusMinutes(1))) {
+            Double s = redisTemplate.opsForZSet().score(RankingKey.minute(m), String.valueOf(productId));
+            if (s != null) {
+                sum += s;
+            }
+        }
+        return sum;
+    }
+
     @DisplayName("이벤트를 처리하면,")
     @Nested
     class OnEvent {
@@ -82,6 +96,22 @@ class RankingScoreIntegrationTest {
 
             // assert
             assertThat(score(productId)).isCloseTo(0.1, within(1e-9));
+        }
+
+        @DisplayName("조회 이벤트가 커밋되면, 일간 키뿐 아니라 현재 분 버킷에도 점수가 반영되고 TTL이 걸린다.")
+        @Test
+        void reflectsMinuteBucketScore_whenProductViewed() {
+            // arrange
+            long productId = 10L;
+
+            // act
+            viewAggregatorService.handleProductViewed("view:min", productId, 1000L);
+
+            // assert — 분 버킷에도 0.1 반영, 해당 버킷에 TTL 존재
+            assertThat(minuteBucketScore(productId)).isCloseTo(0.1, within(1e-9));
+            Long ttlNow = redisTemplate.getExpire(RankingKey.minute(LocalDateTime.now()));
+            Long ttlPrev = redisTemplate.getExpire(RankingKey.minute(LocalDateTime.now().minusMinutes(1)));
+            assertThat(Math.max(ttlNow, ttlPrev)).isGreaterThan(0);
         }
 
         @DisplayName("주문 이벤트가 커밋되면, items별 상품 점수가 0.6×log10(1+price×qty)로 반영된다.")

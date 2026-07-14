@@ -25,8 +25,17 @@ public class RankingFacade {
 
     @Transactional(readOnly = true)
     public List<RankingInfo> getRankings(LocalDate date, int page, int size) {
+        return getRankingsByKey(RankingKey.daily(date), page, size);
+    }
+
+    @Transactional(readOnly = true)
+    public List<RankingInfo> getHourlyRankings(int page, int size) {
+        return getRankingsByKey(RankingKey.hourlyCurrent(), page, size);
+    }
+
+    private List<RankingInfo> getRankingsByKey(String key, int page, int size) {
         int offset = (page - 1) * size;
-        List<RankedEntry> entries = rankingRepository.findPage(RankingKey.daily(date), offset, size);
+        List<RankedEntry> entries = rankingRepository.findPage(key, offset, size);
         if (entries.isEmpty()) {
             return List.of();
         }

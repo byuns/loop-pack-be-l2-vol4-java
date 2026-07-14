@@ -34,4 +34,14 @@ public class RankingV1Controller {
         List<RankingInfo> rankings = rankingFacade.getRankings(targetDate, page, size);
         return ApiResponse.success(rankings.stream().map(RankingV1Dto.RankingResponse::from).toList());
     }
+
+    // 시간 단위(지난 1시간) 실시간 랭킹 — 날짜 없이 롤링 스냅샷 하나만 조회한다(H6: 별도 엔드포인트)
+    @GetMapping("/hourly")
+    public ApiResponse<List<RankingV1Dto.RankingResponse>> getHourlyRankings(
+        @RequestParam(defaultValue = "1") int page,
+        @RequestParam(defaultValue = "20") int size
+    ) {
+        List<RankingInfo> rankings = rankingFacade.getHourlyRankings(page, size);
+        return ApiResponse.success(rankings.stream().map(RankingV1Dto.RankingResponse::from).toList());
+    }
 }

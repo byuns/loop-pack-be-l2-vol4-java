@@ -22,8 +22,25 @@ public class RankingRedisRepositoryImpl implements RankingRepository {
 
     @Override
     public void incrementScore(String key, Long productId, double score) {
+        incrementScore(key, productId, score, TTL);
+    }
+
+    @Override
+    public void incrementScore(String key, Long productId, double score, Duration ttl) {
         redisTemplate.opsForZSet().incrementScore(key, String.valueOf(productId), score);
-        redisTemplate.expire(key, TTL);
+        redisTemplate.expire(key, ttl);
+    }
+
+    @Override
+    public void unionInto(String destKey, List<String> sourceKeys, Duration ttl) {
+        if (sourceKeys.isEmpty()) {
+            return;
+        }
+        // ZUNIONSTORE dest sourceKeys... — 없는 키는 빈 집합으로 취급된다.
+        String first = sourceKeys.get(0);
+        List<String> rest = sourceKeys.subList(1, sourceKeys.size());
+        redisTemplate.opsForZSet().unionAndStore(first, rest, destKey);
+        redisTemplate.expire(destKey, ttl);
     }
 
     @Override

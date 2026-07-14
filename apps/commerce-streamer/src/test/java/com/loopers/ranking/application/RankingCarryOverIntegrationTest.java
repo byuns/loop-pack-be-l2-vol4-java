@@ -3,6 +3,7 @@ package com.loopers.ranking.application;
 import com.loopers.ranking.domain.RankingKey;
 import com.loopers.utils.RedisCleanUp;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +43,13 @@ class RankingCarryOverIntegrationTest {
 
     @Autowired
     private RedisCleanUp redisCleanUp;
+
+    // [fix] 시작 시점 정리 누락으로 직전 테스트/백그라운드 스케줄러의 Redis 잔여가 남아
+    //       "내일 키 부재" 단언이 순서에 따라 깨지던 플래키 수정
+    @BeforeEach
+    void setUp() {
+        redisCleanUp.truncateAll();
+    }
 
     @AfterEach
     void tearDown() {
