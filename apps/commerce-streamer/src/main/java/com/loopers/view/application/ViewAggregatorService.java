@@ -4,7 +4,10 @@ import com.loopers.eventhandled.domain.EventHandledModel;
 import com.loopers.eventhandled.domain.EventHandledRepository;
 import com.loopers.metrics.domain.ProductMetricsModel;
 import com.loopers.metrics.domain.ProductMetricsRepository;
+import com.loopers.ranking.domain.RankingScoreEvent;
+import com.loopers.ranking.domain.RankingScorePolicy;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +17,8 @@ public class ViewAggregatorService {
 
     private final ProductMetricsRepository productMetricsRepository;
     private final EventHandledRepository eventHandledRepository;
+    private final ApplicationEventPublisher eventPublisher;
+    private final RankingScorePolicy scorePolicy;
 
     @Transactional
     public void handleProductViewed(String eventId, Long productId, long occurredAtMillis) {
@@ -28,5 +33,8 @@ public class ViewAggregatorService {
             .orElseGet(() -> new ProductMetricsModel(productId));
         metrics.applyView(occurredAtMillis);
         productMetricsRepository.save(metrics);
+
+        // 커밋 후 랭킹 ZSET 반영(best-effort). 새로 처리된 이벤트에만 발행 → 멱등성은 event_handled가 책임.
+        eventPublisher.publishEvent(new RankingScoreEvent(productId, scorePolicy.viewScore()));
     }
 }

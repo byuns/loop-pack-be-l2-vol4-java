@@ -9,8 +9,12 @@ import com.loopers.payment.domain.PaymentStatus;
 import com.loopers.payment.infrastructure.PaymentJpaRepository;
 import com.loopers.payment.infrastructure.pg.PgPaymentClient;
 import com.loopers.payment.infrastructure.pg.PgPaymentClientDto;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.loopers.support.error.CoreException;
 import com.loopers.support.error.ErrorType;
+import com.loopers.support.outbox.OutboxEvent;
+import com.loopers.support.outbox.OutboxJpaRepository;
 import com.loopers.utils.DatabaseCleanUp;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -44,6 +48,12 @@ class PaymentFacadeIntegrationTest {
 
     @Autowired
     private DatabaseCleanUp databaseCleanUp;
+
+    @Autowired
+    private OutboxJpaRepository outboxJpaRepository;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockBean
     private PgPaymentClient pgPaymentClient;
@@ -295,6 +305,35 @@ class PaymentFacadeIntegrationTest {
 
             // assert
             assertThat(paymentJpaRepository.findByTransactionKey("UNKNOWN-KEY")).isEmpty();
+        }
+
+        @DisplayName("SUCCESS로 확정되면, 발행되는 ORDER_CONFIRMED payload의 각 item에 개당 단가(price)가 포함된다.")
+        @Test
+        void includesPriceInOrderConfirmedPayload_whenConfirmed() throws Exception {
+            // arrange
+            OrderModel order = orderJpaRepository.save(
+                new OrderModel(1L, "user1", List.of(new OrderItemModel(1L, "에어맥스", 150000L, 2)), null, 0L)
+            );
+            order.startPayment();
+            orderJpaRepository.save(order);
+            paymentJpaRepository.save(new PaymentModel(order.getId(), "TX-001234", "SAMSUNG", 300000L, "user1"));
+            when(pgPaymentClient.getTransaction(anyString(), eq("TX-001234")))
+                .thenReturn(new PgPaymentClientDto.TransactionResponse("TX-001234", "SUCCESS", "정상 승인되었습니다."));
+
+            // act
+            paymentFacade.handleCallback("TX-001234", order.getId());
+
+            // assert
+            OutboxEvent outbox = outboxJpaRepository.findAll().stream()
+                .filter(e -> "ORDER_CONFIRMED".equals(e.getEventType()))
+                .findFirst()
+                .orElseThrow();
+            JsonNode item = objectMapper.readTree(outbox.getPayload()).get("items").get(0);
+            assertAll(
+                () -> assertThat(item.get("productId").asLong()).isEqualTo(1L),
+                () -> assertThat(item.get("quantity").asLong()).isEqualTo(2L),
+                () -> assertThat(item.get("price").asLong()).isEqualTo(150000L)
+            );
         }
     }
 

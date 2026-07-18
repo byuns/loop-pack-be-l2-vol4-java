@@ -9,6 +9,8 @@ import com.loopers.product.domain.ProductService;
 import com.loopers.product.domain.ProductSummaryModel;
 import com.loopers.product.domain.SortCondition;
 import com.loopers.product.domain.event.ProductViewedEvent;
+import com.loopers.ranking.domain.RankingKey;
+import com.loopers.ranking.domain.RankingRepository;
 import com.loopers.stock.domain.StockModel;
 import com.loopers.stock.domain.StockRepository;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +22,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,6 +41,7 @@ public class ProductFacade {
     private final StockRepository stockRepository;
     private final ProductCacheService productCacheService;
     private final ApplicationEventPublisher eventPublisher;
+    private final RankingRepository rankingRepository;
 
     @Transactional
     public ProductInfo createProduct(String name, String description, Long price, Integer initialStock, Long brandId) {
@@ -57,7 +61,8 @@ public class ProductFacade {
             .orElse(0);
         // 조회 행동 로깅 + 조회수 집계용 이벤트 (AFTER_COMMIT 리스너가 로깅/Kafka 발행)
         eventPublisher.publishEvent(new ProductViewedEvent(productId, Instant.now()));
-        return cached.withStock(availableStock);
+        Long rank = rankingRepository.findRank(RankingKey.daily(LocalDate.now()), productId);
+        return cached.withStock(availableStock).withRank(rank);
     }
 
     @Cacheable(cacheNames = "products", key = "#sort.name() + ':' + #brandId + ':' + #inStock + ':' + #page + ':' + #size")

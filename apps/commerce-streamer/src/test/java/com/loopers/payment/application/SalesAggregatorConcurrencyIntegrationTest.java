@@ -63,7 +63,7 @@ class SalesAggregatorConcurrencyIntegrationTest {
                 try {
                     start.await();
                     salesAggregatorService.handleOrderConfirmed(
-                        "order:" + orderId, List.of(new SalesItem(productId, 1L)));
+                        "order:" + orderId, List.of(new SalesItem(productId, 1L, 1000L)));
                 } catch (Exception e) {
                     failures.incrementAndGet();
                 } finally {
@@ -86,7 +86,7 @@ class SalesAggregatorConcurrencyIntegrationTest {
     @Test
     void createsRow_whenProductMetricsNotExists() {
         // act
-        salesAggregatorService.handleOrderConfirmed("order:1000", List.of(new SalesItem(42L, 3L)));
+        salesAggregatorService.handleOrderConfirmed("order:1000", List.of(new SalesItem(42L, 3L, 1000L)));
 
         // assert
         ProductMetricsModel metrics = productMetricsJpaRepository.findByProductId(42L).orElseThrow();

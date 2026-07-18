@@ -162,7 +162,7 @@ class EventConsumerIntegrationTest {
 
     private String orderConfirmedPayload(long orderId) {
         return "{\"eventType\":\"ORDER_CONFIRMED\",\"orderId\":" + orderId + ","
-            + "\"items\":[{\"productId\":1,\"quantity\":2},{\"productId\":2,\"quantity\":1}]}";
+            + "\"items\":[{\"productId\":1,\"quantity\":2,\"price\":1000},{\"productId\":2,\"quantity\":1,\"price\":5000}]}";
     }
 
     private String productViewedPayload(long productId, long occurredAtMillis) {

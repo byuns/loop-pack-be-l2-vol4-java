@@ -29,6 +29,20 @@ demo-kafka:
   test:
     topic-name: demo.internal.topic-v1
 
+# 랭킹 점수 가중치 — 재배포 없이(설정 변경/재기동) 조절 가능 (Nice-to-Have: 실시간 Weight 조절)
+ranking:
+  weight:
+    view: 0.1
+    like: 0.2
+    order: 0.6
+  # 콜드 스타트 완화 — 23:50에 오늘 Top-N을 감쇠해 내일 키에 밑그림으로 적재
+  carryover:
+    decay: 0.1
+    top-n: 500
+  # 시간 단위(1시간) 실시간 랭킹 — 최근 window-minutes개 분 버킷을 1분마다 사전 합산
+  hourly:
+    window-minutes: 60
+
 ---
 spring:
   config:

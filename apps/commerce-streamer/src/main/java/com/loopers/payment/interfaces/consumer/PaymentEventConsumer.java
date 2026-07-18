@@ -59,7 +59,11 @@ public class PaymentEventConsumer {
     private List<SalesItem> parseItems(JsonNode payload) {
         List<SalesItem> items = new ArrayList<>();
         for (JsonNode item : payload.get("items")) {
-            items.add(new SalesItem(item.get("productId").asLong(), item.get("quantity").asLong()));
+            items.add(new SalesItem(
+                item.get("productId").asLong(),
+                item.get("quantity").asLong(),
+                item.get("price").asLong()
+            ));
         }
         return items;
     }

@@ -241,9 +241,11 @@ public class PaymentFacade {
         payload.put("eventType", "ORDER_CONFIRMED");
         payload.put("orderId", order.getId());
         payload.put("items", order.getItems().stream()
+            // price(개당 단가)는 랭킹 점수(price × quantity) 계산에 필요해 payload에 포함한다
             .map(item -> Map.of(
                 "productId", item.getProductId(),
-                "quantity", item.getQuantity()
+                "quantity", item.getQuantity(),
+                "price", item.getPrice()
             ))
             .toList());
         try {
