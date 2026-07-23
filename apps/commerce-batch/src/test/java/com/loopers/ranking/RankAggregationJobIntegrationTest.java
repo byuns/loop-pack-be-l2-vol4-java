@@ -103,6 +103,24 @@ class RankAggregationJobIntegrationTest {
             assertThat(second.getExitStatus().getExitCode()).isEqualTo(ExitStatus.COMPLETED.getExitCode());
             assertThat(weeklyRepository.findAllByOrderByRankAsc()).hasSize(2);
         }
+
+        @DisplayName("집계 대상(product_metrics)이 비어 있으면, 새로 구울 게 없으므로 기존 MV를 지우지 않고 유지한다.")
+        @Test
+        void keepsExistingMv_whenSourceIsEmpty() throws Exception {
+            // arrange — product_metrics는 비우고, 기존 MV에 마지막 정상 판 1행을 심어둔다
+            weeklyRepository.save(new WeeklyProductRankModel(999L, 1, 123.0));
+            jobLauncherTestUtils.setJob(job);
+
+            // act
+            var execution = jobLauncherTestUtils.launchJob(params("weekly"));
+
+            // assert — Job은 성공하고 기존 판이 그대로 남는다(비우기 미발생)
+            assertThat(execution.getExitStatus().getExitCode()).isEqualTo(ExitStatus.COMPLETED.getExitCode());
+            List<WeeklyProductRankModel> remaining = weeklyRepository.findAllByOrderByRankAsc();
+            assertThat(remaining).hasSize(1);
+            assertThat(remaining.get(0).getProductId()).isEqualTo(999L);
+            assertThat(remaining.get(0).getScore()).isEqualTo(123.0);
+        }
     }
 
     @DisplayName("월간 랭킹 집계 Job은, period=monthly면 월간 MV에 적재한다.")
